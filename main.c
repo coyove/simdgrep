@@ -60,6 +60,7 @@ NEXT:
     lstat(name, &ss);
 
     size_t ln = strlen(name);
+    ln = name[ln - 1] == '/' ? ln - 1 : ln;
     if (S_ISDIR(ss.st_mode)) {
         DIR *dir = opendir(name);
         if (dir == NULL) {
@@ -108,10 +109,16 @@ bool grep_callback(const struct grepline *l) {
     return true;
 }
 
+#define V(msg, ...) if (flags.verbose) { printf(msg, __VA_ARGS__); }
+
 int main(int argc, char **argv) 
 {
-    flags.verbose = true;
+    flags.verbose = false;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+
+    struct stack s;
+    s.root = NULL;
+    s.count = 0;
 
     struct grepper g;
     g.file.after_lines = 0;
@@ -119,19 +126,44 @@ int main(int argc, char **argv)
     g.binary_mode = BINARY_IGNORE;
     g.use_regex = false;
 
+    if (argc < 2) {
+        printf("usage: simdgrep [OPTIONS]... PATTERN FILES");
+        return 0;
+    }
+    const char *expr = argv[1];
+    int arg_files = argc - 1;
+    for (int i = 1; i < argc - 1 && argv[i][0] == '-'; i++) {
+        expr = argv[i + 1];
+        arg_files = i + 2;
+        for (int j = 1; j < strlen(argv[i]); j++) {
+            switch (argv[i][j]) {
+            case 'V': flags.verbose = true; break;
+            case 'Z': flags.ignore_case = false; break;
+            case 'a': g.binary_mode = BINARY_TEXT;
+            case 'I': g.binary_mode = BINARY_IGNORE;
+            case 'j':
+                      flags.num_threads = strtol(argv[i] + j + 1, NULL, 10);
+                      j = strlen(argv[i]);
+                      break;
+            }
+        }
+    }
+    
+    V("* search pattern: %s\n", expr);
+    V("* use %d threads\n", flags.num_threads);
+    V("* binary mode: %d\n", g.binary_mode);
+
     bool g_inited = false;
-    const char *expr = "func\\("; // argv[1];
     g.rx_info = rx_extract_plain(expr);
     if (g.rx_info.unsupported_escape) {
         fprintf(stderr, "expression with unsupported escape at '%s'", g.rx_info.unsupported_escape);
         return 1;
     }
+
     for (int i = 0 ; i < g.rx_info.fixed_len; ) {
         int ln = strlen(g.rx_info.fixed_patterns + i);
         if (ln) {
-            if (flags.verbose)
-                printf("%sfixed pattern: %s\n", !g_inited && g.rx_info.fixed_start ? "start " : "",
-                        g.rx_info.fixed_patterns + i);
+            V("* %sfixed pattern: %s\n", !g_inited && g.rx_info.fixed_start ? "start " : "", g.rx_info.fixed_patterns + i);
             if (!g_inited) {
                 grepper_init(&g, g.rx_info.fixed_patterns + i, flags.ignore_case);
                 g_inited = true;
@@ -155,13 +187,19 @@ int main(int argc, char **argv)
         }
     }
 
-    struct stack s;
-    s.root = NULL;
-    s.count = 0;
-
-    char *startpoint = (char *)malloc(1000);
-    strcpy(startpoint, "linux-6.13.2");
-    stack_push(&s, startpoint);
+    if (arg_files >= argc) {
+        char *dot = (char *)malloc(2);
+        strcpy(dot, ".");
+        stack_push(&s, dot);
+        V("* search current directory\n", 0);
+    } else {
+        for (; arg_files < argc; arg_files++) {
+            char *startpoint = (char *)malloc(strlen(argv[arg_files]) + 1);
+            strcpy(startpoint, argv[arg_files]);
+            V("* search in %s\n", startpoint);
+            stack_push(&s, startpoint);
+        }
+    }
 
     struct payload payloads[flags.num_threads];
     pthread_t threads[flags.num_threads];
@@ -181,6 +219,6 @@ int main(int argc, char **argv)
     free(sigs);
     int num_files = stack_free(&s);
     if (flags.verbose)
-        printf("found %d files\n", num_files);
+        printf("* found %d files\n", num_files);
     return 0;
 }

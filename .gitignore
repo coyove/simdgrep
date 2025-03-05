@@ -4,3 +4,4 @@ a.out*
 cpuprofile
 *.map
 out.*
+simdgrep
