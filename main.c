@@ -131,7 +131,7 @@ int main(int argc, char **argv)
         return 0;
     }
     const char *expr = argv[1];
-    int arg_files = argc - 1;
+    int arg_files = argc;
     for (int i = 1; i < argc - 1 && argv[i][0] == '-'; i++) {
         expr = argv[i + 1];
         arg_files = i + 2;
@@ -156,7 +156,7 @@ int main(int argc, char **argv)
     bool g_inited = false;
     g.rx_info = rx_extract_plain(expr);
     if (g.rx_info.unsupported_escape) {
-        fprintf(stderr, "expression with unsupported escape at '%s'", g.rx_info.unsupported_escape);
+        fprintf(stderr, "expression with unsupported escape at '%s'\n", g.rx_info.unsupported_escape);
         return 1;
     }
 
@@ -173,10 +173,14 @@ int main(int argc, char **argv)
         }
         i += ln + 1;
     }
+
     if (!g_inited) {
+        V("* no fixed pattern found, require full scan\n", 0);
         grepper_init(&g, "\n", flags.ignore_case);
     }
+
     if (!g.rx_info.pure) {
+        V("* enabled regex\n", 0);
         g.use_regex = true;
         int rc = regcomp(&g.rx, expr, REG_EXTENDED | REG_ICASE);
         if (rc) {

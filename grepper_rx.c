@@ -89,8 +89,14 @@ struct rx_pattern_info rx_extract_plain(const char *s)
                 pp[j++] = s[i];
                 break;
             default:
-                info.unsupported_escape = s + i - 1;
-                return info;
+                char *end;
+                strtol(s + i, &end, 10);
+                if (end == s + i) {
+                    info.unsupported_escape = s + i - 1;
+                    return info;
+                }
+                info.pure = false;
+                i = end - s;
             }
             break;
         case '.':

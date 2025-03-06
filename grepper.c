@@ -489,6 +489,16 @@ NG:
             goto NG;
         }
 
+        struct grepline gl = {
+            .memo = memo,
+            .g = g,
+            .nr = nr,
+            .buf = buf,
+            .is_binary = is_binary,
+            .line_start = line_start,
+            .line_end = line_end,
+        };
+
         if (g->use_regex) {
             const char *rx_start = g->rx_info.fixed_start ? s : line_start;
             int cap = line_end - rx_start + 1;
@@ -505,15 +515,6 @@ NG:
             }
         }
 
-        struct grepline gl = {
-            .memo = memo,
-            .g = g,
-            .nr = nr,
-            .buf = buf,
-            .is_binary = is_binary,
-            .line_start = line_start,
-            .line_end = line_end,
-        };
         if (!g->file.callback(&gl))
             break;
         if (is_binary && g->binary_mode == BINARY)
