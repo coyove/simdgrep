@@ -39,28 +39,7 @@ static const int BINARY = 0;
 static const int BINARY_TEXT = 1;
 static const int BINARY_IGNORE = 2;
 
-typedef const char *(*indexer)(const char *, const char *, const uint8_t, const uint8_t);
-
 typedef int (*comparer)(const char *, const char *, size_t);
-
-static const int wordchars[256] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, // 0 - 9
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // a - o
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, // p - z, _
-    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // A - O
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, // P - Z
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-};
 
 struct rx_pattern_info {
     char *fixed_patterns;
@@ -91,7 +70,7 @@ struct grepper {
     int binary_mode;
     int lf;
     int table[256];
-    uint64_t falses;
+    uint64_t _Atomic falses;
     char *lu;
     char *ll;
     bool ignore_case;
@@ -103,6 +82,12 @@ struct grepper {
     struct _grepper_file file;
 };
 
+struct grepper_ctx {
+    void *memo;
+    char *buf;
+    size_t buf_len;
+};
+
 void grepper_init(struct grepper *g, const char *find, bool ignore_case);
 
 struct grepper *grepper_add(struct grepper *g, const char *find);
@@ -111,7 +96,7 @@ void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
-int grepper_file(struct grepper *g, const char *path, int64_t size, void *memo);
+int grepper_file(struct grepper *, const char *, int64_t, struct grepper_ctx *);
 
 const char *indexbyte(const char *s, const char *end, const uint8_t a);
 

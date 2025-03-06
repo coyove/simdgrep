@@ -2,11 +2,6 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 
-static char bads[32] = {
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-};
-
 int64_t now() {
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC_RAW, &start);
@@ -196,24 +191,20 @@ inline const char *index4bytes(const char *s, const char *end, uint32_t v, uint8
 {
     uint32x4_t needle = vdupq_n_u32(v);
     uint8x16_t casemask = vdupq_n_u8(mask);
-
+    uint8x8_t lookup1 = {0, 1, 2, 3, 1, 2, 3, 4}; 
+    uint8x8_t lookup2 = {2, 3, 4, 5, 3, 4, 5, 6};
     while (s <= end - 16) {
         uint8x16_t haystack1 = vld1q_u8((const uint8_t *)s);
-        uint8x16_t haystack2 = vextq_u8(haystack1, haystack1, 1);
-        uint8x16_t haystack3 = vextq_u8(haystack1, haystack1, 2);
-        uint8x16_t haystack4 = vextq_u8(haystack1, haystack1, 3);
-        uint8x16_t zipped1 = vandq_u8(vzipq_u8(haystack1, haystack2).val[0], casemask);
-        uint8x16_t zipped2 = vandq_u8(vzipq_u8(haystack3, haystack4).val[0], casemask);
-        uint16x8_t zipped = vzipq_u16(vreinterpretq_u16_u8(zipped1), vreinterpretq_u16_u8(zipped2)).val[0];
-        uint32x4_t interleaved = vreinterpretq_u32_u16(zipped);
-        uint32x4_t mask = vceqq_u32(interleaved, needle);
+        uint8x8x2_t table = {vget_low_u8(haystack1)};
+        uint8x16_t interleaved = vcombine_u8(vtbl2_u8(table, lookup1), vtbl2_u8(table, lookup2));
+        uint32x4_t mask = vceqq_u32(vreinterpretq_u32_u8(interleaved), needle);
         uint16x4_t res = vshrn_n_u32(mask, 1);
         uint64_t matches = vget_lane_u64(vreinterpret_u64_u16(res), 0);
         if (matches > 0) {
             int one = __builtin_ctzll(matches) / 16;
             return s + one;
         }
-        s += 8;
+        s += 4;
     }
 
     while (s < end - 3) {
@@ -278,7 +269,6 @@ const char *indexcasebyte(const char *s, const char *end, const uint8_t lo, cons
 const char *indexbyte(const char *s, const char *end, const uint8_t a)
 {
     uint8x16_t needle = vdupq_n_u8(a);
-    uint8x16_t zeros = vdupq_n_u8(0);
     while (s <= end - 16) {
         uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
         uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
@@ -295,14 +285,34 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a)
     return 0;
 }
 
+const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
+{
+    uint8x16_t needle = vdupq_n_u8(a);
+    while (start <= s - 16) {
+        s -= 16;
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
+        uint8x8_t res = vshrn_n_u16(mask, 4);
+        uint64_t m = vreinterpret_u64_u8(res);
+        if (m > 0) {
+            return s + 15 - __builtin_clzll(m) / 4;
+        }
+    }
+
+    for (; s >= start; s--) {
+        if (*s == a)
+            return s;
+    }
+    return 0;
+}
+
 #endif
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case)
 {
     g->ignore_case = ignore_case;
     g->lf = strlen(find);
-    g->find = (char *)malloc(g->lf + 1);
-    memcpy(g->find, find, g->lf + 1);
+    g->find = strdup(find);
     g->lu = (char *)malloc(g->lf * 2);
     g->ll = g->lu + g->lf;
     for (int i = 0; i < g->lf; i++){
@@ -342,9 +352,8 @@ void grepper_free(struct grepper *g)
     free(g->lu);
     if (g->file.next_g)
         grepper_free(g->file.next_g);
-    if (g->use_regex) {
+    if (g->use_regex)
         regfree(&g->rx);
-    }
     free(g->rx_info.fixed_patterns);
 }
 
@@ -372,6 +381,7 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
 {
 	if (g->lf == 0 || s + g->lf > end)
         return 0;
+
     if (s + g->lf == end)
         return cmp(s, g->find, g->lf) == 0 ? s : 0;
 
@@ -381,31 +391,23 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
             indexcasebyte(s, end, tolower(*g->find), toupper(*g->find)) :
             indexbyte(s, end, *g->find);
 
-    // if (g->lf == 4) {
-    //     uint32_t mask4 = (g->ignore_case ? 0xDFDFDFDF : 0xFFFFFFFF);
-    //     uint32_t v = *(uint32_t *)g->find & mask4;
-    //     while (s <= end - g->lf) {
-    //         s = index4bytes(s, end, v, g->_case_mask8, mask4);
-    //         if (!s)
-    //             return s;
-    //         if (strncasecmp(s, g->find, g->lf) == 0)
-    //             return s;
-    //         s++;
-    //     }
-    //     return NULL;
-    // }
-
-    if (g->lf >= MAX_BRUTE_FORCE_LENGTH)
+    if (0 || g->lf >= MAX_BRUTE_FORCE_LENGTH)
         return indexcasestr_long(g, s, end);
 
     uint16_t v = *(uint16_t *)g->find & g->_case_mask16;
+    int adv = (v >> 8) == (v & 0xFF) ? 1 : 2;
     while (s <= end - g->lf) {
         s = index2bytes(s, end, v, g->_case_mask8, g->_case_mask16);
         if (!s)
             return s;
-        if (strncasecmp(s, g->find, g->lf) == 0)
-            return s;
-        s++;
+        for (int i = 0; i < g->lf; i++) {
+            if (*(s + i) != g->lu[i] && *(s + i) != g->ll[i])
+                goto FALSES;
+        }
+        return s;
+FALSES:
+        atomic_fetch_add(&g->falses, 1);
+        s += adv;
     }
 	return 0;
 }
@@ -422,12 +424,8 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
-int grepper_file(struct grepper *g, const char *path, int64_t size, void *memo)
+int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepper_ctx *ctx)
 {
-    // const char *zzz = "0123456789abcde\x00 hij";
-    // printf("start %s\n", path);
-    // return 0;
-
     if (size == 0)
         return 0;
 
@@ -438,7 +436,12 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, void *memo)
     char *buf, *rx_tmp = NULL;
     bool readbuf = false;
     if (size < 1 << 16) {
-        buf = (char *)malloc(size);
+        if (size > ctx->buf_len) {
+            if (ctx->buf) 
+                free(ctx->buf);
+            ctx->buf = (char *)malloc(ctx->buf_len = size);
+        }
+        buf = ctx->buf;
         if (read(fd, buf, size) == -1) {
             close(fd);
             return -1;
@@ -452,7 +455,6 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, void *memo)
         }
     }
 
-    // bool is_binary = !istext(buf, buf + (size > 1024 ? 1024 : size));
     bool is_binary = indexbyte(buf, buf + (size > 1024 ? 1024 : size), 0);
     if (is_binary && g->binary_mode == BINARY_IGNORE)
         goto CLEANUP;
@@ -465,12 +467,11 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, void *memo)
         if (!s)
             break;
        
-        const char *line_start = s;
-        while (last_hit <= line_start - 1 && *(line_start - 1) != '\n')
-            --line_start;
+        const char *line_start = indexlastbyte(buf, s, '\n');
+        line_start = line_start ? line_start + 1 : buf;
+
         const char *line_end = indexbyte(s, end, '\n');
-        if (!line_end)
-            line_end = end;
+        line_end = line_end ? line_end : end;
 
         nr += countbyte(last_hit, s, '\n');
         last_hit = s;
@@ -490,7 +491,7 @@ NG:
         }
 
         struct grepline gl = {
-            .memo = memo,
+            .memo = ctx->memo,
             .g = g,
             .nr = nr,
             .buf = buf,
@@ -530,7 +531,8 @@ NG:
     }
  
 CLEANUP:
-    readbuf ? free(buf) : munmap(buf, size);
+    if (!readbuf)
+        munmap(buf, size);
     close(fd);
     if (rx_tmp)
         free(rx_tmp);
