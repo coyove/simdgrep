@@ -29,6 +29,8 @@
 
 #endif
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 #ifdef __MAX_BRUTE_FORCE_LENGTH
 static const int MAX_BRUTE_FORCE_LENGTH = __MAX_BRUTE_FORCE_LENGTH;
 #else
@@ -67,12 +69,12 @@ struct _grepper_file {
 
 struct grepper {
     char *find;
+    char *findupper;
+    char *findlower;
     int binary_mode;
-    int lf;
-    int table[256];
+    int len;
+    int *table;
     uint64_t _Atomic falses;
-    char *lu;
-    char *ll;
     bool ignore_case;
     uint8_t _case_mask8;
     uint16_t _case_mask16;

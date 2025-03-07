@@ -7,7 +7,6 @@
 #include <dirent.h>
 #include <string.h>
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
 
 static struct _flags {

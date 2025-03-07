@@ -329,23 +329,29 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case)
 {
+    int jumps[256];
+    memset(jumps, -1, 256 * sizeof(int));
+
     g->ignore_case = ignore_case;
-    g->lf = strlen(find);
-    g->find = strdup(find);
-    g->lu = (char *)malloc(g->lf * 2);
-    g->ll = g->lu + g->lf;
-    for (int i = 0; i < g->lf; i++){
+    g->len = strlen(find);
+    g->find = (char *)malloc(g->len * 3);
+    g->findupper = g->find + g->len;
+    g->findlower = g->findupper + g->len;
+    for (int i = 0; i < g->len; i++){
         if (ignore_case) {
-            g->lu[i] = toupper(find[i]);
-            g->ll[i] = tolower(find[i]);
+            g->findupper[i] = toupper(find[i]);
+            g->findlower[i] = tolower(find[i]);
         } else {
-            g->lu[i] = g->ll[i] = find[i];
+            g->findupper[i] = g->findlower[i] = find[i];
         }
+        g->find[i] = find[i];
+        jumps[(uint8_t)g->findlower[i]] = jumps[(uint8_t)g->findupper[i]] = i;
     }
-    memset(g->table, -1, 256 * sizeof(int));
-    for (int i = 0; i < g->lf; i++) {
-        g->table[(uint8_t)g->ll[i]] = i;
-        g->table[(uint8_t)g->lu[i]] = i;
+    g->table = (int *)malloc(g->len * 256 * sizeof(int));
+    for (int i = 0; i < g->len; i++) {
+        for (int j = 0; j < 256; j++) {
+            g->table[i * 256 + j] = MAX(i - jumps[j], 1);
+        }
     }
     g->falses = 0;
     g->file.next_g = 0;
@@ -368,7 +374,7 @@ struct grepper *grepper_add(struct grepper *g, const char *find)
 void grepper_free(struct grepper *g)
 {
     free(g->find);
-    free(g->lu);
+    free(g->table);
     if (g->file.next_g)
         grepper_free(g->file.next_g);
     if (g->use_regex)
@@ -378,7 +384,7 @@ void grepper_free(struct grepper *g)
 
 static const char *indexcasestr_long(struct grepper *g, const char *s, const char *end)
 {
-    int64_t lf = g->lf;
+    int64_t lf = g->len;
     uint16_t v = *(uint16_t *)(g->find + lf - 2) & g->_case_mask16;
     while (s <= end - lf) {
         s = index2bytes(s + lf - 2, end, v, g->_case_mask8, g->_case_mask16);
@@ -386,41 +392,42 @@ static const char *indexcasestr_long(struct grepper *g, const char *s, const cha
             return s;
         s -= lf - 2;
         int j = lf - 1;
-        while (j >= 0 && (s[j] == g->ll[j] || s[j] == g->lu[j]))
+        while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
             --j;
         if (j < 0)
             return s;
-		int slide = j - g->table[(uint8_t)s[j]];
-        s += slide < 1 ? 1 : slide;
+		s += g->table[j * 256 + (uint8_t)s[j]];
     }
 	return 0;
 }
 
-static const char *indexcasestr(struct grepper *g, const char *s, const char *end, comparer cmp)
+static const char *indexcasestr(struct grepper *g, const char *s, const char *end)
 {
-	if (g->lf == 0 || s + g->lf > end)
+	if (s + g->len > end)
         return 0;
 
-    if (s + g->lf == end)
-        return cmp(s, g->find, g->lf) == 0 ? s : 0;
+    if (s + g->len == end) {
+        if (g->ignore_case)
+            return strncasecmp(s, g->find, g->len) == 0 ? s : 0;
+        return strncmp(s, g->find, g->len) == 0 ? s : 0;
+    }
 
-    int64_t idx = 0;
-    if (g->lf == 1)
+    if (g->len == 1)
         return g->ignore_case ?
             indexcasebyte(s, end, tolower(*g->find), toupper(*g->find)) :
             indexbyte(s, end, *g->find);
 
-    if (0 || g->lf >= MAX_BRUTE_FORCE_LENGTH)
+    if (1 || g->len >= MAX_BRUTE_FORCE_LENGTH)
         return indexcasestr_long(g, s, end);
 
     uint16_t v = *(uint16_t *)g->find & g->_case_mask16;
     int adv = (v >> 8) == (v & 0xFF) ? 1 : 2;
-    while (s <= end - g->lf) {
+    while (s <= end - g->len) {
         s = index2bytes(s, end, v, g->_case_mask8, g->_case_mask16);
         if (!s)
             return s;
-        for (int i = 0; i < g->lf; i++) {
-            if (*(s + i) != g->lu[i] && *(s + i) != g->ll[i])
+        for (int i = 0; i < g->len; i++) {
+            if (*(s + i) != g->findupper[i] && *(s + i) != g->findlower[i])
                 goto FALSES;
         }
         return s;
@@ -431,15 +438,9 @@ FALSES:
 	return 0;
 }
 
-static const char *_grepper_find(struct grepper *g, const char *s, const char *end)
-{
-    return g->ignore_case ? 
-        indexcasestr(g, s, end, strncasecmp) : indexcasestr(g, s, end, strncmp);
-}
-
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
 {
-    const char *found = _grepper_find(g, s, s + ls);
+    const char *found = indexcasestr(g, s, s + ls);
     return found ? found - s : -1;
 }
 
@@ -451,7 +452,7 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
- 
+
     char *buf, *rx_tmp = NULL;
     bool readbuf = false;
     if (size < 1 << 16) {
@@ -483,7 +484,7 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
     int64_t nr = 0, rx_tmp_len = 0;
     const char *s = buf, *last_hit = buf, *end = buf + size;
     while (s < end) {
-        s = _grepper_find(g, s, end);
+        s = indexcasestr(g, s, end);
         if (!s)
             break;
        
@@ -497,15 +498,15 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
         last_hit = s;
 
         struct grepper *ng = g->file.next_g;
-        const char *ss = s + g->lf;
+        const char *ss = s + g->len;
 NG:
         if (ng) {
-            ss = _grepper_find(ng, ss, line_end);
+            ss = indexcasestr(ng, ss, line_end);
             if (!ss) {
-                s += g->lf;
+                s += g->len;
                 continue;
             }
-            ss = ss + ng->lf;
+            ss = ss + ng->len;
             ng = ng->file.next_g;
             goto NG;
         }
