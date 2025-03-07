@@ -224,6 +224,6 @@ int main(int argc, char **argv)
     grepper_free(&g);
     int num_files = stack_free(&s);
     LOG("* searched %d files\n", num_files);
-    fprintf(stderr, "%llu\n", g.falses);
+    // fprintf(stderr, "%llu\n", g.falses);
     return 0;
 }

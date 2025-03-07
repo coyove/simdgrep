@@ -140,6 +140,25 @@ const char* indexcasebyte(const char *s, const char* end, const uint8_t lo, cons
     return 0;
 }
 
+const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
+{
+    __m256i needle = _mm256_set1_epi8(a);
+    while (start <= s - 32) {
+        s -= 32;
+        __m256i haystack = _mm256_loadu_si256((__m256i *)s);
+        __m256i res = _mm256_cmpeq_epi8(haystack, needle);
+        uint32_t map = _mm256_movemask_epi8(res);
+        if (map > 0) {
+            int one = __builtin_clzll(map) - 32;
+            return s + 31 - one;
+        }
+    }
+    for (; s >= start; s--) {
+        if (*s == a) return s;
+    }
+    return 0;
+}
+
 const char *indexbyte(const char *s, const char *end, const uint8_t a)
 {
     __m256i needle = _mm256_set1_epi8(a);
@@ -453,6 +472,7 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
             close(fd);
             return -1;
         }
+        madvise(buf, size, MADV_SEQUENTIAL | MADV_WILLNEED);
     }
 
     bool is_binary = indexbyte(buf, buf + (size > 1024 ? 1024 : size), 0);
