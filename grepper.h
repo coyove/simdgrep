@@ -30,14 +30,13 @@
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #ifdef __MAX_BRUTE_FORCE_LENGTH
 static const int MAX_BRUTE_FORCE_LENGTH = __MAX_BRUTE_FORCE_LENGTH;
 #else
 static const int MAX_BRUTE_FORCE_LENGTH = 16;
 #endif
-
-static const int LINE_BUF_SIZE = 65536;
 
 static int64_t now() {
     struct timespec start;
@@ -49,6 +48,8 @@ static const int BINARY = 0;
 static const int BINARY_TEXT = 1;
 static const int BINARY_IGNORE = 2;
 
+struct grepper_ctx;
+
 struct rx_pattern_info {
     char *fixed_patterns;
     int fixed_len;
@@ -58,12 +59,14 @@ struct rx_pattern_info {
 };
 
 struct grepline {
-    void *memo;
+    struct grepper_ctx *ctx;
     struct grepper *g;
     int64_t nr;
     bool is_binary;
-    const char *line_start;
-    const char *line_end;
+    const char *line;
+    int len;
+    int match_start;
+    int match_end;
 };
 
 struct _grepper_file {
@@ -78,7 +81,7 @@ struct grepper {
     char *findlower;
     int binary_mode;
     int len;
-    int *table;
+    int table[256];
     uint64_t _Atomic falses;
     bool ignore_case;
     uint8_t _case_mask8;
@@ -88,8 +91,6 @@ struct grepper {
     struct rx_pattern_info rx_info;
     struct _grepper_file file;
 };
-
-struct grepper_ctx;
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case);
 
@@ -116,6 +117,9 @@ struct linebuf {
     int lines;
     int len;
     int datalen;
+    int buflen;
+    bool overflowed;
+    bool is_binary;
     char *buffer;
 };
 
@@ -124,12 +128,17 @@ struct grepper_ctx {
     struct linebuf lbuf;
 };
 
-static void buffer_init(struct linebuf *l)
+static void buffer_init(struct linebuf *l, int line_size)
 {
-    l->buffer = (char *)malloc(LINE_BUF_SIZE);
+    l->buflen = line_size;
+    /* 
+       Regex will use this buffer to do matching and temporarily place NULL at
+       the end of line, reserve 1 byte for the last line of the file.
+       */
+    l->buffer = (char *)malloc(line_size + 1);
 }
 
-static void buffer_fill(struct linebuf *l)
+static void buffer_fill(struct linebuf *l, const char *path)
 {
     l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
 
@@ -138,7 +147,7 @@ static void buffer_fill(struct linebuf *l)
     l->len = l->datalen = l->datalen - l->len;
 
     // Fill rest space.
-    int n = read(l->fd, l->buffer + l->len, LINE_BUF_SIZE - l->len);
+    int n = read(l->fd, l->buffer + l->len, l->buflen - l->len);
     if (n <= 0) {
         return;
     }
@@ -148,7 +157,9 @@ static void buffer_fill(struct linebuf *l)
 
     const char *end = indexlastbyte(l->buffer, l->buffer + l->datalen, '\n');
     if (end) {
-        l->len = end - l->buffer;
+        l->len = end - l->buffer + 1;
+    } else if (l->datalen == l->buflen) {
+        l->overflowed = true;
     }
 }
 

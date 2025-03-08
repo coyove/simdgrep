@@ -12,10 +12,14 @@
 static struct _flags {
     bool verbose;
     bool ignore_case;
+    bool color;
     int num_threads;
+    int line_size;
 } flags = {
     .verbose = false,
     .ignore_case = true,
+    .line_size = 65536,
+    .color = true,
 };
 
 struct payload {
@@ -91,6 +95,9 @@ NEXT:
             fprintf(stderr, "read %s: ", name);
             perror("");
         }
+        if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary) {
+            fprintf(stderr, "%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
+        }
     }
 
 CLEANUP:
@@ -99,14 +106,23 @@ CLEANUP:
 }
 
 bool grep_callback(const struct grepline *l) {
-    int64_t ln = (int64_t)(l->line_end - l->line_start);
-    const char *name = ((struct payload *)l->memo)->current_file;
-    if (l->is_binary) {
+    struct payload *p = (struct payload *)l->ctx->memo;
+    const char *name = p->current_file;
+    if (l->ctx->lbuf.is_binary) {
         printf("%s: binary file matches\n", name);
         return true;
     }
-    if (ln < 1 << 20) {
-        printf("%s:%lld:%.*s\n", name, l->nr, (int)ln, l->line_start);
+    if (l->len < 1 << 20) {
+        if (!flags.color) {
+            printf("%s:%lld:%.*s\n", name, l->nr + 1, l->len, l->line);
+        } else {
+            printf("\033[1;35m%s\033[0m:\033[1;32m%lld\033[0m:%.*s\033[1;31m%.*s\033[0m%.*s\n",
+                    name, l->nr + 1,
+                    l->match_start, l->line,
+                    l->match_end - l->match_start, l->line + l->match_start,
+                    l->len - l->match_end, l->line + l->match_end
+                  );
+        }
     }
     return true;
 }
@@ -118,8 +134,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    flags.verbose = false;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    flags.color = isatty(STDOUT_FILENO);
 
     struct stack s;
     s.root = NULL;
@@ -140,8 +156,13 @@ int main(int argc, char **argv)
             switch (argv[i][j]) {
             case 'V': flags.verbose = true; break;
             case 'Z': flags.ignore_case = false; break;
+            case 'P': flags.color = false; break; 
             case 'a': g.binary_mode = BINARY_TEXT;
             case 'I': g.binary_mode = BINARY_IGNORE;
+            case 'M':
+                      flags.line_size = MAX(1, strtol(argv[i] + j + 1, NULL, 10)) * 1024;
+                      j = strlen(argv[i]);
+                      break;
             case 'j':
                       flags.num_threads = MAX(1, strtol(argv[i] + j + 1, NULL, 10));
                       j = strlen(argv[i]);
@@ -151,6 +172,7 @@ int main(int argc, char **argv)
     }
     
     LOG("* search pattern: '%s', arg files: %d\n", expr, argc - arg_files);
+    LOG("* line size: %dK\n", flags.line_size / 1024);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
 
@@ -210,7 +232,7 @@ int main(int argc, char **argv)
         payloads[i].s = &s;
         payloads[i].sigs = sigs;
         payloads[i].ctx.memo = &payloads[i];
-        buffer_init(&payloads[i].ctx.lbuf);
+        buffer_init(&payloads[i].ctx.lbuf, flags.line_size);
         pthread_create(&threads[i], NULL, push, (void *)&payloads[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {

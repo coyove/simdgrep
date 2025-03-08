@@ -5,3 +5,4 @@ cpuprofile
 *.map
 out.*
 simdgrep
+test*.txt

@@ -147,7 +147,7 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
             return s + 31 - one;
         }
     }
-    for (; s >= start; s--) {
+    for (s--; s >= start; s--) {
         if (*s == a) return s;
     }
     return 0;
@@ -312,7 +312,7 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
         }
     }
 
-    for (; s >= start; s--) {
+    for (s--; s >= start; s--) {
         if (*s == a)
             return s;
     }
@@ -323,14 +323,12 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case)
 {
-    int jumps[256];
-    memset(jumps, -1, 256 * sizeof(int));
-
     g->ignore_case = ignore_case;
     g->len = strlen(find);
     g->find = (char *)malloc(g->len * 3);
     g->findupper = g->find + g->len;
     g->findlower = g->findupper + g->len;
+    memset(g->table, -1, 256 * sizeof(int));
     for (int i = 0; i < g->len; i++){
         if (ignore_case) {
             g->findupper[i] = toupper(find[i]);
@@ -339,13 +337,7 @@ void grepper_init(struct grepper *g, const char *find, bool ignore_case)
             g->findupper[i] = g->findlower[i] = find[i];
         }
         g->find[i] = find[i];
-        jumps[(uint8_t)g->findlower[i]] = jumps[(uint8_t)g->findupper[i]] = i;
-    }
-    g->table = (int *)malloc(g->len * 256 * sizeof(int));
-    for (int i = 0; i < g->len; i++) {
-        for (int j = 0; j < 256; j++) {
-            g->table[i * 256 + j] = MAX(i - jumps[j], 1);
-        }
+        g->table[(uint8_t)g->findlower[i]] = g->table[(uint8_t)g->findupper[i]] = i;
     }
     g->falses = 0;
     g->file.next_g = 0;
@@ -368,7 +360,6 @@ struct grepper *grepper_add(struct grepper *g, const char *find)
 void grepper_free(struct grepper *g)
 {
     free(g->find);
-    free(g->table);
     if (g->file.next_g)
         grepper_free(g->file.next_g);
     if (g->use_regex)
@@ -390,7 +381,7 @@ static const char *indexcasestr_long(struct grepper *g, const char *s, const cha
             --j;
         if (j < 0)
             return s;
-		s += g->table[j * 256 + (uint8_t)s[j]];
+		s += MAX(1, j - g->table[s[j]]);
     }
 	return 0;
 }
@@ -447,19 +438,17 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
     if (fd < 0)
         return -1;
 
-    char *rx_tmp = NULL;
     struct linebuf *lb = &ctx->lbuf;
     lb->fd = fd;
+    lb->overflowed = false;
     lb->lines = lb->len = lb->datalen = 0;
-    buffer_fill(lb);
+    buffer_fill(lb, path);
 
-    bool is_binary = indexbyte(lb->buffer, lb->buffer + (lb->len > 1024 ? 1024 : lb->len), 0);
-    if (is_binary && g->binary_mode == BINARY_IGNORE)
+    lb->is_binary = indexbyte(lb->buffer, lb->buffer + (lb->len > 1024 ? 1024 : lb->len), 0);
+    if (lb->is_binary && g->binary_mode == BINARY_IGNORE)
         goto CLEANUP;
  
     regmatch_t pmatch[1];
-    int64_t rx_tmp_len = 0;
-
     while (lb->len) {
         int nr = lb->lines;
         const char *s = lb->buffer, *last_hit = lb->buffer, *end = lb->buffer + lb->len;
@@ -477,6 +466,16 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
             nr += countbyte(last_hit, s, '\n');
             last_hit = s;
 
+            struct grepline gl = {
+                .ctx = ctx,
+                .g = g,
+                .nr = nr,
+                .line = line_start,
+                .len = line_end - line_start,
+                .match_start = s - line_start,
+                .match_end = s + g->len - line_start,
+            };
+
             struct grepper *ng = g->file.next_g;
             const char *ss = s + g->len;
 NG:
@@ -488,53 +487,39 @@ NG:
                 }
                 ss = ss + ng->len;
                 ng = ng->file.next_g;
+                gl.match_end = ss - line_start;
                 goto NG;
             }
 
-            struct grepline gl = {
-                .memo = ctx->memo,
-                .g = g,
-                .nr = nr,
-                .is_binary = is_binary,
-                .line_start = line_start,
-                .line_end = line_end,
-            };
-
             if (g->use_regex) {
-                const char *rx_start = g->rx_info.fixed_start ? s : line_start;
-                int cap = line_end - rx_start + 1;
-                if (cap > rx_tmp_len) {
-                    if (rx_tmp)
-                        free(rx_tmp);
-                    rx_tmp = (char *)malloc(rx_tmp_len = cap);
-                }
-                memcpy(rx_tmp, rx_start, cap);
-                rx_tmp[cap - 1] = 0;
-                if (regexec(&g->rx, rx_tmp, 1, pmatch, 0) != 0) {
+                char end = *(char *)line_end;
+                *(char *)line_end = 0;
+                int rc = regexec(&g->rx, g->rx_info.fixed_start ? s : line_start, 1, pmatch, 0);
+                *(char *)line_end = end;
+                if (rc != 0) {
                     s = line_end + 1;
                     continue;
+                }
+                if (g->rx_info.fixed_start) {
+                    gl.match_end = gl.match_start + pmatch[0].rm_eo;
+                    gl.match_start += pmatch[0].rm_so;
+                } else {
+                    gl.match_start = pmatch[0].rm_so;
+                    gl.match_end = pmatch[0].rm_eo;
                 }
             }
 
             if (!g->file.callback(&gl))
                 break;
-            if (is_binary && g->binary_mode == BINARY)
+            if (lb->is_binary && g->binary_mode == BINARY)
                 break;
-
-            // After lines.
-            // for (int a = 0; a < g->file.after_lines && line_end < end; a++) {
-            //     line_start = line_end + 1;
-            //     line_end = indexbyte(line_start, end, '\n');
-            // }
 
             s = line_end;
         }
-        buffer_fill(lb);
+        buffer_fill(lb, path);
     }
  
 CLEANUP:
     close(fd);
-    if (rx_tmp)
-        free(rx_tmp);
     return 0;
 }
