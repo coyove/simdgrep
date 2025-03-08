@@ -2,12 +2,6 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 
-int64_t now() {
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
-    return start.tv_sec * 1000000000L + start.tv_nsec;
-}
-
 #ifdef __cplusplus
 
 #include <string>
@@ -66,7 +60,7 @@ std::ostream& operator<<(std::ostream &out, const uint8x8_t& v) {
 #include <immintrin.h>
 #include <smmintrin.h>  
 
-static int64_t countbyte(const char *s, const char *end, const uint8_t c)
+int64_t countbyte(const char *s, const char *end, const uint8_t c)
 {
     __m256i needle = _mm256_set1_epi8(c);
     int64_t count = 0;
@@ -453,107 +447,92 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
     if (fd < 0)
         return -1;
 
-    char *buf, *rx_tmp = NULL;
-    bool readbuf = false;
-    if (size < 1 << 16) {
-        if (size > ctx->buf_len) {
-            if (ctx->buf) 
-                free(ctx->buf);
-            ctx->buf = (char *)malloc(ctx->buf_len = size);
-        }
-        buf = ctx->buf;
-        if (read(fd, buf, size) == -1) {
-            close(fd);
-            return -1;
-        }
-        readbuf = true;
-    } else {
-        buf = (char *)mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
-        if (buf == MAP_FAILED) {
-            close(fd);
-            return -1;
-        }
-        madvise(buf, size, MADV_SEQUENTIAL | MADV_WILLNEED);
-    }
+    char *rx_tmp = NULL;
+    struct linebuf *lb = &ctx->lbuf;
+    lb->fd = fd;
+    lb->lines = lb->len = lb->datalen = 0;
+    buffer_fill(lb);
 
-    bool is_binary = indexbyte(buf, buf + (size > 1024 ? 1024 : size), 0);
+    bool is_binary = indexbyte(lb->buffer, lb->buffer + (lb->len > 1024 ? 1024 : lb->len), 0);
     if (is_binary && g->binary_mode == BINARY_IGNORE)
         goto CLEANUP;
  
     regmatch_t pmatch[1];
-    int64_t nr = 0, rx_tmp_len = 0;
-    const char *s = buf, *last_hit = buf, *end = buf + size;
-    while (s < end) {
-        s = indexcasestr(g, s, end);
-        if (!s)
-            break;
-       
-        const char *line_start = indexlastbyte(buf, s, '\n');
-        line_start = line_start ? line_start + 1 : buf;
+    int64_t rx_tmp_len = 0;
 
-        const char *line_end = indexbyte(s, end, '\n');
-        line_end = line_end ? line_end : end;
+    while (lb->len) {
+        int nr = lb->lines;
+        const char *s = lb->buffer, *last_hit = lb->buffer, *end = lb->buffer + lb->len;
+        while (s < end) {
+            s = indexcasestr(g, s, end);
+            if (!s)
+                break;
 
-        nr += countbyte(last_hit, s, '\n');
-        last_hit = s;
+            const char *line_start = indexlastbyte(lb->buffer, s, '\n');
+            line_start = line_start ? line_start + 1 : lb->buffer;
 
-        struct grepper *ng = g->file.next_g;
-        const char *ss = s + g->len;
+            const char *line_end = indexbyte(s, end, '\n');
+            line_end = line_end ? line_end : end;
+
+            nr += countbyte(last_hit, s, '\n');
+            last_hit = s;
+
+            struct grepper *ng = g->file.next_g;
+            const char *ss = s + g->len;
 NG:
-        if (ng) {
-            ss = indexcasestr(ng, ss, line_end);
-            if (!ss) {
-                s += g->len;
-                continue;
+            if (ng) {
+                ss = indexcasestr(ng, ss, line_end);
+                if (!ss) {
+                    s += g->len;
+                    continue;
+                }
+                ss = ss + ng->len;
+                ng = ng->file.next_g;
+                goto NG;
             }
-            ss = ss + ng->len;
-            ng = ng->file.next_g;
-            goto NG;
+
+            struct grepline gl = {
+                .memo = ctx->memo,
+                .g = g,
+                .nr = nr,
+                .is_binary = is_binary,
+                .line_start = line_start,
+                .line_end = line_end,
+            };
+
+            if (g->use_regex) {
+                const char *rx_start = g->rx_info.fixed_start ? s : line_start;
+                int cap = line_end - rx_start + 1;
+                if (cap > rx_tmp_len) {
+                    if (rx_tmp)
+                        free(rx_tmp);
+                    rx_tmp = (char *)malloc(rx_tmp_len = cap);
+                }
+                memcpy(rx_tmp, rx_start, cap);
+                rx_tmp[cap - 1] = 0;
+                if (regexec(&g->rx, rx_tmp, 1, pmatch, 0) != 0) {
+                    s = line_end + 1;
+                    continue;
+                }
+            }
+
+            if (!g->file.callback(&gl))
+                break;
+            if (is_binary && g->binary_mode == BINARY)
+                break;
+
+            // After lines.
+            // for (int a = 0; a < g->file.after_lines && line_end < end; a++) {
+            //     line_start = line_end + 1;
+            //     line_end = indexbyte(line_start, end, '\n');
+            // }
+
+            s = line_end;
         }
-
-        struct grepline gl = {
-            .memo = ctx->memo,
-            .g = g,
-            .nr = nr,
-            .buf = buf,
-            .is_binary = is_binary,
-            .line_start = line_start,
-            .line_end = line_end,
-        };
-
-        if (g->use_regex) {
-            const char *rx_start = g->rx_info.fixed_start ? s : line_start;
-            int cap = line_end - rx_start + 1;
-            if (cap > rx_tmp_len) {
-                if (rx_tmp)
-                    free(rx_tmp);
-                rx_tmp = (char *)malloc(rx_tmp_len = cap);
-            }
-            memcpy(rx_tmp, rx_start, cap);
-            rx_tmp[cap - 1] = 0;
-            if (regexec(&g->rx, rx_tmp, 1, pmatch, 0) != 0) {
-                s = line_end + 1;
-                continue;
-            }
-        }
-
-        if (!g->file.callback(&gl))
-            break;
-        if (is_binary && g->binary_mode == BINARY)
-            break;
-
-        // After lines.
-        // for (int a = 0; a < g->file.after_lines && line_end < end; a++) {
-        //     line_start = line_end + 1;
-        //     line_end = indexbyte(line_start, end, '\n');
-        // }
-
-        s = line_end;
+        buffer_fill(lb);
     }
  
 CLEANUP:
-    if (!readbuf)
-        munmap(buf, size);
     close(fd);
     if (rx_tmp)
         free(rx_tmp);

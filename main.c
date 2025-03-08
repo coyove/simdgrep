@@ -20,11 +20,11 @@ static struct _flags {
 
 struct payload {
     int i;
+    uint32_t _Atomic *sigs;
+    const char *current_file;
     struct stack *s;
     struct grepper *g;
     struct grepper_ctx ctx;
-    uint32_t _Atomic *sigs;
-    const char *current_file;
 };
 
 bool is_repo_bin(const char *dir, const char *name)
@@ -209,15 +209,13 @@ int main(int argc, char **argv)
         payloads[i].g = &g;
         payloads[i].s = &s;
         payloads[i].sigs = sigs;
-        payloads[i].ctx.buf = NULL;
-        payloads[i].ctx.buf_len = 0;
         payloads[i].ctx.memo = &payloads[i];
+        buffer_init(&payloads[i].ctx.lbuf);
         pthread_create(&threads[i], NULL, push, (void *)&payloads[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
         pthread_join(threads[i], NULL);
-        if (payloads[i].ctx.buf)
-            free(payloads[i].ctx.buf);
+        buffer_free(&payloads[i].ctx.lbuf);
     }
 
     grepper_free(&g);
