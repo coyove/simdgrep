@@ -40,7 +40,7 @@ static const int MAX_BRUTE_FORCE_LENGTH = 16;
 
 static int64_t now() {
     struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+    clock_gettime(CLOCK_MONOTONIC, &start);
     return start.tv_sec * 1000000000L + start.tv_nsec;
 }
 

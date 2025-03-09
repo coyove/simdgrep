@@ -8,9 +8,11 @@
 #include <dirent.h>
 #include <string.h>
 
-#define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
 #define LOCK() if (flags.use_lock) { pthread_mutex_lock(&flags.lock); }
 #define UNLOCK() if (flags.use_lock) { pthread_mutex_unlock(&flags.lock); }
+#define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
+#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); if (errno) perror(""); UNLOCK(); }
+#define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
 
 static struct _flags {
     bool verbose;
@@ -18,7 +20,7 @@ static struct _flags {
     bool color;
     int num_threads;
     int line_size;
-    bool quiet;
+    int quiet;
     bool use_lock;
     pthread_mutex_t lock; 
     const char **includes;
@@ -31,7 +33,7 @@ static struct _flags {
     .line_size = 65536,
     .color = true,
     .use_lock = true,
-    .quiet = false,
+    .quiet = 0,
 };
 
 struct payload {
@@ -84,10 +86,7 @@ NEXT:
     if (S_ISDIR(ss.st_mode)) {
         DIR *dir = opendir(name);
         if (dir == NULL) {
-            LOCK();
-            fprintf(stderr, "open %s: ", name);
-            perror("");
-            UNLOCK();
+            ERR("open %s: ", name);
             goto CLEANUP;
         }
         struct dirent *dirent;
@@ -123,16 +122,11 @@ NEXT:
         if (incl) {
             p->current_file = name;
             int res = grepper_file(p->g, name, ss.st_size, &p->ctx);
-            if (res != 0)  {
-                LOCK();
-                fprintf(stderr, "read %s: ", name);
-                perror("");
-                UNLOCK();
+            if (res != 0) {
+                ERR("read %s: ", name);
             }
-            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && !flags.quiet) {
-                LOCK();
-                fprintf(stderr, "%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
-                UNLOCK();
+            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
+                WARN("%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
             }
         }
     }
@@ -175,6 +169,7 @@ void usage()
     printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
     printf("\t-P\tprint results without coloring\n");
     printf("\t-q\tsuppress warning messages\n");
+    printf("\t-qq\tsuppress error messages\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
     printf("\t-M<num>\tmax line length in kilobytes, any lines longer will be split,\n");
@@ -217,7 +212,7 @@ int main(int argc, char **argv)
             case 'V': flags.verbose = true; break;
             case 'Z': flags.ignore_case = false; break;
             case 'P': flags.color = false; break; 
-            case 'q': flags.quiet = true; break;
+            case 'q': flags.quiet++; break;
             case 'a': g.binary_mode = BINARY_TEXT; break;
             case 'I': g.binary_mode = BINARY_IGNORE; break;
             case 'M':
@@ -243,7 +238,7 @@ int main(int argc, char **argv)
 
     g.rx_info = rx_extract_plain(expr);
     if (g.rx_info.unsupported_escape) {
-        fprintf(stderr, "pattern with unsupported escape at '%s'\n", g.rx_info.unsupported_escape);
+        ERR("pattern with unsupported escape at '%s'\n", g.rx_info.unsupported_escape);
         goto EXIT;
     }
 
@@ -274,7 +269,7 @@ int main(int argc, char **argv)
         if (rc) {
             char buffer[1024];
             regerror(rc, &g.rx, buffer, 1024);
-            fprintf(stderr, "invalid expression '%s': %s", expr, buffer);
+            ERR("invalid expression '%s': %s", expr, buffer);
             goto CLEANUP;
         }
     }

@@ -1,3 +1,7 @@
-simdgrep is a simple tool to search strings among a large number of files, just like 'grep -r'.
+simdgrep is a simple tool to search strings among a large number of files, just like `grep -r`.
 
-It only runs on x86_64 with AVX2 and/or aarch64, tested on Linux and MacOS.
+It only runs on x86_64 with AVX2 and/or aarch64, tested on Windows (msys2), Linux and MacOS (M-chip).
+
+This is not a drop-in for `grep` and it differs in many ways (lacks a lot of features), i wrote this just to suit my own needs.
+
+To build it, run `make all`.
