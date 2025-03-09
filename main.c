@@ -1,5 +1,6 @@
 #include "stack.h"
 #include "grepper.h"
+#include "wildmatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 #include <string.h>
 
 #define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
+#define LOCK() if (flags.use_lock) { pthread_mutex_lock(&flags.lock); }
+#define UNLOCK() if (flags.use_lock) { pthread_mutex_unlock(&flags.lock); }
 
 static struct _flags {
     bool verbose;
@@ -15,11 +18,20 @@ static struct _flags {
     bool color;
     int num_threads;
     int line_size;
+    bool quiet;
+    bool use_lock;
+    pthread_mutex_t lock; 
+    const char **includes;
+    int num_includes;
+    const char **excludes;
+    int num_excludes;
 } flags = {
     .verbose = false,
     .ignore_case = true,
     .line_size = 65536,
     .color = true,
+    .use_lock = true,
+    .quiet = false,
 };
 
 struct payload {
@@ -72,8 +84,10 @@ NEXT:
     if (S_ISDIR(ss.st_mode)) {
         DIR *dir = opendir(name);
         if (dir == NULL) {
+            LOCK();
             fprintf(stderr, "open %s: ", name);
             perror("");
+            UNLOCK();
             goto CLEANUP;
         }
         struct dirent *dirent;
@@ -82,21 +96,44 @@ NEXT:
             if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0 || is_repo_bin(name, dname))
                 continue;
             char *buf = (char *)malloc(ln + 1 + strlen(dname) + 1);
-            memcpy(buf, name, ln);
-            memcpy(buf + ln, "/", 1);
-            memcpy(buf + ln + 1, dname, strlen(dname) + 1);
+            if (strcmp(name, ".") == 0) {
+                memcpy(buf, dname, strlen(dname) + 1);
+            } else {
+                memcpy(buf, name, ln);
+                memcpy(buf + ln, "/", 1);
+                memcpy(buf + ln + 1, dname, strlen(dname) + 1);
+            }
             stack_push(p->s, buf);
         }
         closedir(dir);
     } else if (S_ISREG(ss.st_mode)) {
-        p->current_file = name;
-        int res = grepper_file(p->g, name, ss.st_size, &p->ctx);
-        if (res != 0)  {
-            fprintf(stderr, "read %s: ", name);
-            perror("");
+        bool incl = flags.num_includes == 0;
+        for (int i = 0; i < flags.num_includes; i++) {
+            if (wildmatch(flags.includes[i], name, WM_CASEFOLD) == WM_MATCH) {
+                incl = true;
+                break;
+            }
         }
-        if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary) {
-            fprintf(stderr, "%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
+        for (int i = 0; incl && i < flags.num_excludes; i++) {
+            if (wildmatch(flags.excludes[i], name, WM_CASEFOLD) == WM_MATCH) {
+                incl = false;
+                break;
+            }
+        }
+        if (incl) {
+            p->current_file = name;
+            int res = grepper_file(p->g, name, ss.st_size, &p->ctx);
+            if (res != 0)  {
+                LOCK();
+                fprintf(stderr, "read %s: ", name);
+                perror("");
+                UNLOCK();
+            }
+            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && !flags.quiet) {
+                LOCK();
+                fprintf(stderr, "%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
+                UNLOCK();
+            }
         }
     }
 
@@ -108,11 +145,10 @@ CLEANUP:
 bool grep_callback(const struct grepline *l) {
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = p->current_file;
+    LOCK();
     if (l->ctx->lbuf.is_binary) {
         printf("%s: binary file matches\n", name);
-        return true;
-    }
-    if (l->len < 1 << 20) {
+    } else if (l->len < 1 << 20) {
         if (!flags.color) {
             printf("%s:%lld:%.*s\n", name, l->nr + 1, l->len, l->line);
         } else {
@@ -124,15 +160,38 @@ bool grep_callback(const struct grepline *l) {
                   );
         }
     }
+    UNLOCK();
     return true;
+}
+
+void usage()
+{
+    printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
+    printf("PATTERN syntax is POSIX extended regex\n");
+    printf("FILE starting with '+' is an include pattern, e.g.: simdgrep PATTERN dir +*.c\n");
+    printf("FILE starting with '-' is an exclude pattern, e.g.: simdgrep PATTERN dir -testdata\n");
+    printf("\n");
+    printf("\t-V\tverbose output\n");
+    printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
+    printf("\t-P\tprint results without coloring\n");
+    printf("\t-q\tsuppress warning messages\n");
+    printf("\t-a\ttreat binary as text\n");
+    printf("\t-I\tignore binary files\n");
+    printf("\t-M<num>\tmax line length in kilobytes, any lines longer will be split,\n");
+    printf("\t       \tthus matches may be incomplete\n");
+    printf("\t-J<num>\tnumber of threads for grepping\n");
 }
 
 int main(int argc, char **argv) 
 {
-    if (argc < 2) {
-        printf("usage: simdgrep [OPTIONS]... PATTERN FILES...");
+    if (argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        usage();
         return 0;
     }
+    if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
+        printf("mutex init has failed\n"); 
+        return 0; 
+    } 
 
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     flags.color = isatty(STDOUT_FILENO);
@@ -142,9 +201,10 @@ int main(int argc, char **argv)
     s.count = 0;
 
     struct grepper g;
+    g.find = NULL;
     g.file.after_lines = 0;
     g.file.callback = grep_callback;
-    g.binary_mode = BINARY_IGNORE;
+    g.binary_mode = BINARY;
     g.use_regex = false;
 
     const char *expr = argv[1];
@@ -157,8 +217,9 @@ int main(int argc, char **argv)
             case 'V': flags.verbose = true; break;
             case 'Z': flags.ignore_case = false; break;
             case 'P': flags.color = false; break; 
-            case 'a': g.binary_mode = BINARY_TEXT;
-            case 'I': g.binary_mode = BINARY_IGNORE;
+            case 'q': flags.quiet = true; break;
+            case 'a': g.binary_mode = BINARY_TEXT; break;
+            case 'I': g.binary_mode = BINARY_IGNORE; break;
             case 'M':
                       flags.line_size = MAX(1, strtol(argv[i] + j + 1, NULL, 10)) * 1024;
                       j = strlen(argv[i]);
@@ -176,56 +237,69 @@ int main(int argc, char **argv)
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
 
-    bool g_inited = false;
+    struct payload payloads[flags.num_threads];
+    pthread_t threads[flags.num_threads];
+    uint32_t _Atomic sigs[flags.num_threads];
+
     g.rx_info = rx_extract_plain(expr);
     if (g.rx_info.unsupported_escape) {
         fprintf(stderr, "pattern with unsupported escape at '%s'\n", g.rx_info.unsupported_escape);
-        return 1;
+        goto EXIT;
     }
 
     for (int i = 0 ; i < g.rx_info.fixed_len; ) {
         int ln = strlen(g.rx_info.fixed_patterns + i);
         if (ln) {
-            LOG("* %sfixed pattern: %s\n", !g_inited && g.rx_info.fixed_start ? "start " : "", g.rx_info.fixed_patterns + i);
-            if (!g_inited) {
+            LOG("* fixed %s: %s\n", !g.find && g.rx_info.fixed_start ? "prefix " : "pattern", g.rx_info.fixed_patterns + i);
+            if (!g.find) {
                 grepper_init(&g, g.rx_info.fixed_patterns + i, flags.ignore_case);
-                g_inited = true;
             } else {
                 grepper_add(&g, g.rx_info.fixed_patterns + i);
             }
         }
         i += ln + 1;
     }
-    if (!g_inited) {
+    if (!g.find) {
         LOG("* no fixed pattern found, require full scan\n");
         grepper_init(&g, "\n", flags.ignore_case);
     }
 
+    flags.includes = (const char **)malloc(sizeof(const char *) * argc);
+    flags.excludes = (const char **)malloc(sizeof(const char *) * argc);
+
     if (!g.rx_info.pure) {
         LOG("* enabled regex\n");
         g.use_regex = true;
-        int rc = regcomp(&g.rx, expr, REG_EXTENDED | REG_ICASE);
+        int rc = regcomp(&g.rx, expr, REG_EXTENDED | (flags.ignore_case ? REG_ICASE : 0));
         if (rc) {
             char buffer[1024];
             regerror(rc, &g.rx, buffer, 1024);
             fprintf(stderr, "invalid expression '%s': %s", expr, buffer);
-            return 1;
+            goto CLEANUP;
         }
     }
 
-    if (arg_files >= argc) {
+    for (; arg_files < argc; arg_files++) {
+        const char *name = argv[arg_files];
+        if (strlen(name) == 0)
+            continue;
+        if (name[0] == '-') {
+            flags.excludes[flags.num_excludes++] = name + 1;
+            LOG("* exclude pattern %s\n", name + 1);
+            continue;
+        }
+        if (name[0] == '+') {
+            flags.includes[flags.num_includes++] = name + 1;
+            LOG("* include pattern %s\n", name + 1);
+            continue;
+        }
+        LOG("* search %s\n", name);
+        stack_push(&s, strdup(name));
+    }
+    if (s.count == 0) {
         stack_push(&s, strdup("."));
         LOG("* search current working directory\n");
-    } else {
-        for (; arg_files < argc; arg_files++) {
-            LOG("* search %s\n", argv[arg_files]);
-            stack_push(&s, strdup(argv[arg_files]));
-        }
     }
-
-    struct payload payloads[flags.num_threads];
-    pthread_t threads[flags.num_threads];
-    uint32_t _Atomic sigs[flags.num_threads];
     for (int i = 0; i < flags.num_threads; ++i) {
         payloads[i].i = i;
         payloads[i].g = &g;
@@ -240,9 +314,16 @@ int main(int argc, char **argv)
         buffer_free(&payloads[i].ctx.lbuf);
     }
 
-    grepper_free(&g);
     int num_files = stack_free(&s);
     LOG("* searched %d files\n", num_files);
     // fprintf(stderr, "%llu\n", g.falses);
+
+CLEANUP:
+    grepper_free(&g);
+    free(flags.includes);
+    free(flags.excludes);
+
+EXIT:
+    pthread_mutex_destroy(&flags.lock); 
     return 0;
 }

@@ -1,0 +1,3 @@
+simdgrep is a simple tool to search strings among a large number of files, just like 'grep -r'.
+
+It only runs on x86_64 with AVX2 and/or aarch64, tested on Linux and MacOS.
