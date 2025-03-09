@@ -21,20 +21,14 @@ static struct _flags {
     int num_threads;
     int line_size;
     int quiet;
+    int xbytes;
     bool use_lock;
     pthread_mutex_t lock; 
     const char **includes;
     int num_includes;
     const char **excludes;
     int num_excludes;
-} flags = {
-    .verbose = false,
-    .ignore_case = true,
-    .line_size = 65536,
-    .color = true,
-    .use_lock = true,
-    .quiet = 0,
-};
+} flags;
 
 struct payload {
     int i;
@@ -136,22 +130,43 @@ CLEANUP:
     goto NEXT;
 }
 
-bool grep_callback(const struct grepline *l) {
+void colorprint(const char *name, int64_t nr, const char *line, int start, int end, int len,
+        const char *labbr, const char *rabbr) 
+{
+    printf("\033[1;35m%s\033[0m:\033[1;32m%lld\033[0m:%s%.*s\033[1;31m%.*s\033[0m%.*s%s\n",
+            name, nr,
+            labbr,
+            start, line, end - start, line + start, len - end, line + end,
+            rabbr);
+}
+
+bool grep_callback(const struct grepline *l)
+{
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = p->current_file;
     LOCK();
-    if (l->ctx->lbuf.is_binary) {
+    if (l->ctx->lbuf.is_binary && p->g->binary_mode == BINARY) {
         printf("%s: binary file matches\n", name);
-    } else if (l->len < 1 << 20) {
-        if (!flags.color) {
+    } else if (l->is_afterline || !flags.color) {
+        if (l->len <= flags.xbytes) {
             printf("%s:%lld:%.*s\n", name, l->nr + 1, l->len, l->line);
         } else {
-            printf("\033[1;35m%s\033[0m:\033[1;32m%lld\033[0m:%.*s\033[1;31m%.*s\033[0m%.*s\n",
-                    name, l->nr + 1,
-                    l->match_start, l->line,
-                    l->match_end - l->match_start, l->line + l->match_start,
-                    l->len - l->match_end, l->line + l->match_end
-                  );
+            int i = MAX(0, l->match_start - flags.xbytes / 2);
+            int j = MIN(l->len, l->match_end + flags.xbytes /2);
+            for (; i >= 0 && ((uint8_t)l->line[i] >> 6) == 2; i--);
+            for (; j < l->len && ((uint8_t)l->line[j] >> 6) == 2; j++);
+            printf("%s:%lld:...%.*s...\n", name, l->nr + 1, j - i, l->line + i);
+        }
+    } else {
+        if (l->len <= flags.xbytes) {
+            colorprint(name, l->nr + 1, l->line, l->match_start, l->match_end, l->len, "", "");
+        } else {
+            int i = MAX(0, l->match_start - flags.xbytes / 2);
+            int j = MIN(l->len, l->match_end + flags.xbytes / 2);
+            for (; i >= 0 && ((uint8_t)l->line[i] >> 6) == 2; i--);
+            for (; j < l->len && ((uint8_t)l->line[j] >> 6) == 2; j++);
+            colorprint(name, l->nr + 1, l->line + i, l->match_start - i, l->match_end - i, j - i,
+                    i == 0 ? "" : "\033[1;33m...\033[0m", j == l->len ? "" : "\033[1;33m...\033[0m");
         }
     }
     UNLOCK();
@@ -172,9 +187,11 @@ void usage()
     printf("\t-qq\tsuppress error messages\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
-    printf("\t-M<num>\tmax line length in kilobytes, any lines longer will be split,\n");
-    printf("\t       \tthus matches may be incomplete\n");
-    printf("\t-J<num>\tnumber of threads for grepping\n");
+    printf("\t-x<NUM>\ttruncate lines longer than NUM bytes to make a pretty look\n");
+    printf("\t-A<NUM>\tprint NUM lines of trailing context\n");
+    printf("\t-M<NUM>\tmax line length in NUM kilobytes, any lines longer will be split,\n");
+    printf("\t       \tthus matches may be incomplete at split points\n");
+    printf("\t-J<NUM>\tnumber of threads for grepping\n");
 }
 
 int main(int argc, char **argv) 
@@ -183,13 +200,21 @@ int main(int argc, char **argv)
         usage();
         return 0;
     }
+
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
         printf("mutex init has failed\n"); 
         return 0; 
     } 
-
-    flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    flags.verbose = false;
     flags.color = isatty(STDOUT_FILENO);
+    flags.ignore_case = flags.color = flags.use_lock = true;
+    flags.line_size = 65536;
+    flags.quiet = 0;
+    flags.xbytes = 1e8;
+    flags.num_includes = flags.num_excludes = 0;
+    flags.includes = (const char **)malloc(sizeof(const char *) * argc);
+    flags.excludes = (const char **)malloc(sizeof(const char *) * argc);
+    flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
 
     struct stack s;
     s.root = NULL;
@@ -203,7 +228,7 @@ int main(int argc, char **argv)
     g.use_regex = false;
 
     const char *expr = argv[1];
-    int arg_files = MAX(2, argc - 1);
+    int arg_files = 2;
     for (int i = 1; i < argc - 1 && argv[i][0] == '-'; i++) {
         expr = argv[i + 1];
         arg_files = i + 2;
@@ -219,6 +244,10 @@ int main(int argc, char **argv)
                       flags.line_size = MAX(1, strtol(argv[i] + j + 1, NULL, 10)) * 1024;
                       j = strlen(argv[i]);
                       break;
+            case 'A': case 'x':
+                      *(argv[i][j] == 'A' ? &g.file.after_lines : &flags.xbytes) = MAX(0, strtol(argv[i] + j + 1, NULL, 10));
+                      j = strlen(argv[i]);
+                      break;
             case 'j':
                       flags.num_threads = MAX(1, strtol(argv[i] + j + 1, NULL, 10));
                       j = strlen(argv[i]);
@@ -231,6 +260,8 @@ int main(int argc, char **argv)
     LOG("* line size: %dK\n", flags.line_size / 1024);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
+    LOG("* print after %d lines\n", g.file.after_lines);
+    LOG("* line context bytes %d\n", flags.xbytes);
 
     struct payload payloads[flags.num_threads];
     pthread_t threads[flags.num_threads];
@@ -245,7 +276,7 @@ int main(int argc, char **argv)
     for (int i = 0 ; i < g.rx_info.fixed_len; ) {
         int ln = strlen(g.rx_info.fixed_patterns + i);
         if (ln) {
-            LOG("* fixed %s: %s\n", !g.find && g.rx_info.fixed_start ? "prefix " : "pattern", g.rx_info.fixed_patterns + i);
+            LOG("* fixed %s: %s\n", !g.find && g.rx_info.fixed_start ? "prefix" : "pattern", g.rx_info.fixed_patterns + i);
             if (!g.find) {
                 grepper_init(&g, g.rx_info.fixed_patterns + i, flags.ignore_case);
             } else {
@@ -258,9 +289,6 @@ int main(int argc, char **argv)
         LOG("* no fixed pattern found, require full scan\n");
         grepper_init(&g, "\n", flags.ignore_case);
     }
-
-    flags.includes = (const char **)malloc(sizeof(const char *) * argc);
-    flags.excludes = (const char **)malloc(sizeof(const char *) * argc);
 
     if (!g.rx_info.pure) {
         LOG("* enabled regex\n");
@@ -315,10 +343,10 @@ int main(int argc, char **argv)
 
 CLEANUP:
     grepper_free(&g);
-    free(flags.includes);
-    free(flags.excludes);
 
 EXIT:
+    free(flags.includes);
+    free(flags.excludes);
     pthread_mutex_destroy(&flags.lock); 
     return 0;
 }

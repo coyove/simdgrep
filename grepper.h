@@ -62,7 +62,7 @@ struct grepline {
     struct grepper_ctx *ctx;
     struct grepper *g;
     int64_t nr;
-    bool is_binary;
+    bool is_afterline;
     const char *line;
     int len;
     int match_start;

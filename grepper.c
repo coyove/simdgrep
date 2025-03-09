@@ -67,16 +67,16 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c)
     while (end - s >= 32) {
         __m256i haystack = _mm256_set_epi64x(*(uint64_t *)(s), *(uint64_t *)(s + 8), *(uint64_t *)(s + 16), *(uint64_t *)(s + 24));
         __m256i res = _mm256_cmpeq_epi8(haystack, needle);
-        int map = _mm256_movemask_epi8(res);
-        count += __builtin_popcount(map);
+        uint32_t map = _mm256_movemask_epi8(res);
+        count += __builtin_popcountll(map);
         s += 32;
     }
     __m128i needle2 = _mm_set1_epi8(c);
     while (end - s >= 16) {
         __m128i haystack = _mm_set_epi64x(*(uint64_t *)(s), *(uint64_t *)(s + 8));
         __m128i res = _mm_cmpeq_epi8(haystack, needle2);
-        int map = _mm_movemask_epi8(res);
-        count += __builtin_popcount(map);
+        uint16_t map = _mm_movemask_epi8(res);
+        count += __builtin_popcountll(map);
         s += 16;
     }
     while (s < end) {
@@ -449,9 +449,30 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
         goto CLEANUP;
  
     regmatch_t pmatch[1];
+    int remain_after_lines = 0;
     while (lb->len) {
-        int nr = lb->lines;
+        struct grepline gl = {
+            .ctx = ctx,
+            .g = g,
+            .nr = lb->lines,
+            .is_afterline = false,
+        };
         const char *s = lb->buffer, *last_hit = lb->buffer, *end = lb->buffer + lb->len;
+
+        // Process the remaining afterlines from the prev line buffer.
+        for (int i = 0; remain_after_lines > 0 && s < end; i++,remain_after_lines--) {
+            const char *line_end = indexbyte(s, end, '\n');
+            if (!line_end)
+                line_end = end;
+            gl.line = s;
+            gl.match_start = gl.match_end = gl.len = line_end - s;
+            gl.is_afterline = true;
+            if (!g->file.callback(&gl))
+                goto CLEANUP;
+            last_hit = s = line_end + 1;
+            gl.nr++;
+        }
+
         while (s < end) {
             s = indexcasestr(g, s, end);
             if (!s)
@@ -463,18 +484,14 @@ int grepper_file(struct grepper *g, const char *path, int64_t size, struct grepp
             const char *line_end = indexbyte(s, end, '\n');
             line_end = line_end ? line_end : end;
 
-            nr += countbyte(last_hit, s, '\n');
+            gl.nr += countbyte(last_hit, s, '\n');
             last_hit = s;
 
-            struct grepline gl = {
-                .ctx = ctx,
-                .g = g,
-                .nr = nr,
-                .line = line_start,
-                .len = line_end - line_start,
-                .match_start = s - line_start,
-                .match_end = s + g->len - line_start,
-            };
+            gl.line = line_start;
+            gl.len = line_end - line_start;
+            gl.match_start = s - line_start;
+            gl.match_end = s + g->len - line_start;
+            gl.is_afterline = false;
 
             struct grepper *ng = g->file.next_g;
             const char *ss = s + g->len;
@@ -510,9 +527,27 @@ NG:
             }
 
             if (!g->file.callback(&gl))
-                break;
+                goto CLEANUP;
             if (lb->is_binary && g->binary_mode == BINARY)
-                break;
+                goto CLEANUP;
+
+            for (int i = 0; i < g->file.after_lines; i++) {
+                const char *ss = line_end + 1;
+                line_end = indexbyte(ss, end, '\n');
+                if (!line_end) {
+                    // Continue printing afterlines when the next line buffer is filled.
+                    line_end = end;
+                    remain_after_lines = g->file.after_lines - i;
+                    break;
+                }
+                gl.nr++;
+                gl.line = ss;
+                gl.match_start = gl.match_end = gl.len = line_end - ss;
+                gl.is_afterline = true;
+                if (!g->file.callback(&gl))
+                    goto CLEANUP;
+                last_hit = line_end;
+            }
 
             s = line_end;
         }
