@@ -397,10 +397,13 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
         return strncmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
-    if (g->len == 1)
+    if (g->len == 1) {
+        if (g->find[0] == '\n')
+            return s;
         return g->ignore_case ?
             indexcasebyte(s, end, tolower(*g->find), toupper(*g->find)) :
             indexbyte(s, end, *g->find);
+    }
 
     if (1 || g->len >= MAX_BRUTE_FORCE_LENGTH)
         return indexcasestr_long(g, s, end);
@@ -549,7 +552,7 @@ NG:
                 last_hit = line_end;
             }
 
-            s = line_end;
+            s = line_end + 1;
         }
         buffer_fill(lb, path);
     }
