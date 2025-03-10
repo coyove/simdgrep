@@ -3,10 +3,12 @@
 #include "wildmatch.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <dirent.h>
 #include <string.h>
+#include <unistd.h>
 
 #define PATH_SEP '/'
 #define LOCK() if (flags.use_lock) { pthread_mutex_lock(&flags.lock); }
@@ -17,6 +19,7 @@
 #define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
 
 static struct _flags {
+    char cwd[PATH_MAX];
     bool verbose;
     bool ignore_case;
     bool color;
@@ -53,17 +56,34 @@ bool is_repo_bin(const char *dir, const char *name)
     return false;
 }
 
-char *join_path(const char *a, const char *b)
+const char *rel_cwd_path(const char *b)
+{
+    int i = 0;
+    for (; i < strlen(flags.cwd) && i < strlen(b) && flags.cwd[i] == b[i]; i++);
+    if (i >= strlen(b))
+        return b;
+    b += i;
+    if (b[0] == PATH_SEP)
+        b++;
+    return *b ? b : ".";
+}
+
+char *join_cwd_path(const char *b)
 {
     char res[PATH_MAX];
     if (strlen(b) > 0 && b[0] == PATH_SEP) {
         memcpy(res, b, strlen(b) + 1);
     } else {
-        memcpy(res, a, strlen(a));
-        res[strlen(a)] = PATH_SEP;
-        memcpy(res + strlen(a) + 1, b, strlen(b) + 1);
+        int ln = strlen(flags.cwd);
+        memcpy(res, flags.cwd, ln);
+        res[ln] = PATH_SEP;
+        memcpy(res + ln + 1, b, strlen(b) + 1);
     }
     char *resolved = realpath(res, NULL);
+    if (!resolved) {
+        ERR("can't resolve path %s", res);
+        exit(0);
+    }
     return resolved;
 }
 
@@ -123,7 +143,7 @@ NEXT:
                 break;
             }
         }
-        for (struct stacknode *n = flags.excludes.root; n; n = n->next) {
+        for (struct stacknode *n = flags.excludes.root; n && incl; n = n->next) {
             if (wildmatch(n->value, name, WM_PATHNAME) == WM_MATCH) {
                 for (struct stacknode *n = flags.negate_excludes.root; n; n = n->next) {
                     if (wildmatch(n->value, name, 0) == WM_MATCH)
@@ -132,6 +152,7 @@ NEXT:
                 incl = false;
                 break;
 NEGATED:
+                incl = true;
             }
         }
         if (incl) {
@@ -164,7 +185,7 @@ void colorprint(const char *name, int64_t nr, const char *line, int start, int e
 bool grep_callback(const struct grepline *l)
 {
     struct payload *p = (struct payload *)l->ctx->memo;
-    const char *name = p->current_file;
+    const char *name = rel_cwd_path(p->current_file);
     LOCK();
     int limit = flags.xbytes + p->g->len + 10;
     if (l->ctx->lbuf.is_binary && p->g->binary_mode == BINARY) {
@@ -224,7 +245,7 @@ void load_ignore_file(const char *path)
         if (buf[0] == '/')
             memcpy(buf, buf + 1, strlen(buf));
         stack_push(negate ? &flags.negate_excludes : &flags.excludes, buf);
-        LOG("* %sexclude pattern %s from ignore file\n", !negate ? "" : "negate ", buf, path);
+        LOG("* %sexclude pattern %s from ignore file\n", !negate ? "" : "negate ", buf);
     }
 
     fclose(fp);
@@ -274,6 +295,7 @@ int main(int argc, char **argv)
     flags.negate_excludes.root = flags.excludes.root = flags.includes.root = NULL;
     flags.negate_excludes.count = flags.excludes.count = flags.includes.count = 0;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    getcwd(flags.cwd, sizeof(flags.cwd));
 
     struct stack s;
     s.root = NULL;
@@ -373,20 +395,20 @@ int main(int argc, char **argv)
         if (strlen(name) == 0)
             continue;
         if (name[0] == '-') {
-            stack_push(&flags.excludes, strdup(name + 1));
+            stack_push(&flags.excludes, join_cwd_path(name + 1));
             LOG("* exclude pattern %s\n", name + 1);
         } else if (name[0] == '+') {
-            stack_push(&flags.includes, strdup(name + 1));
+            stack_push(&flags.includes, join_cwd_path(name + 1));
             LOG("* include pattern %s\n", name + 1);
         } else if (name[0] == '^') {
             load_ignore_file(name + 1);
         } else {
             LOG("* search %s\n", name);
-            stack_push(&s, strdup(name));
+            stack_push(&s, join_cwd_path(name));
         }
     }
     if (s.count == 0) {
-        stack_push(&s, strdup("."));
+        stack_push(&s, join_cwd_path("."));
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
