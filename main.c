@@ -8,10 +8,12 @@
 #include <dirent.h>
 #include <string.h>
 
+#define PATH_SEP '/'
 #define LOCK() if (flags.use_lock) { pthread_mutex_lock(&flags.lock); }
 #define UNLOCK() if (flags.use_lock) { pthread_mutex_unlock(&flags.lock); }
 #define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
-#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); if (errno) perror(""); UNLOCK(); }
+#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); \
+    if (errno) fprintf(stderr, ": %s\n", strerror(errno)); else fprintf(stderr, "\n"); UNLOCK(); }
 #define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
 
 static struct _flags {
@@ -25,10 +27,9 @@ static struct _flags {
     int xbytes;
     bool use_lock;
     pthread_mutex_t lock; 
-    const char **includes;
-    int num_includes;
-    const char **excludes;
-    int num_excludes;
+    struct stack includes;
+    struct stack excludes;
+    struct stack negate_excludes;
 } flags;
 
 struct payload {
@@ -50,6 +51,20 @@ bool is_repo_bin(const char *dir, const char *name)
     if (strcmp(dot, ".hg") == 0 && strcmp(name, "store") == 0)
         return true;
     return false;
+}
+
+char *join_path(const char *a, const char *b)
+{
+    char res[PATH_MAX];
+    if (strlen(b) > 0 && b[0] == PATH_SEP) {
+        memcpy(res, b, strlen(b) + 1);
+    } else {
+        memcpy(res, a, strlen(a));
+        res[strlen(a)] = PATH_SEP;
+        memcpy(res + strlen(a) + 1, b, strlen(b) + 1);
+    }
+    char *resolved = realpath(res, NULL);
+    return resolved;
 }
 
 void *push(void *arg) 
@@ -81,7 +96,7 @@ NEXT:
     if (S_ISDIR(ss.st_mode)) {
         DIR *dir = opendir(name);
         if (dir == NULL) {
-            ERR("open %s: ", name);
+            ERR("open %s", name);
             goto CLEANUP;
         }
         struct dirent *dirent;
@@ -101,24 +116,29 @@ NEXT:
         }
         closedir(dir);
     } else if (S_ISREG(ss.st_mode)) {
-        bool incl = flags.num_includes == 0;
-        for (int i = 0; i < flags.num_includes; i++) {
-            if (wildmatch(flags.includes[i], name, WM_CASEFOLD) == WM_MATCH) {
+        bool incl = flags.includes.count == 0;
+        for (struct stacknode *n = flags.includes.root; n; n = n->next) {
+            if (wildmatch(n->value, name, 0) == WM_MATCH) {
                 incl = true;
                 break;
             }
         }
-        for (int i = 0; incl && i < flags.num_excludes; i++) {
-            if (wildmatch(flags.excludes[i], name, WM_CASEFOLD) == WM_MATCH) {
+        for (struct stacknode *n = flags.excludes.root; n; n = n->next) {
+            if (wildmatch(n->value, name, WM_PATHNAME) == WM_MATCH) {
+                for (struct stacknode *n = flags.negate_excludes.root; n; n = n->next) {
+                    if (wildmatch(n->value, name, 0) == WM_MATCH)
+                        goto NEGATED;
+                }
                 incl = false;
                 break;
+NEGATED:
             }
         }
         if (incl) {
             p->current_file = name;
             int res = grepper_file(p->g, name, ss.st_size, &p->ctx);
             if (res != 0) {
-                ERR("read %s: ", name);
+                ERR("read %s", name);
             }
             if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
                 WARN("%s has long line >%dK, matches may be incomplete\n", name, flags.line_size / 1024);
@@ -134,7 +154,7 @@ CLEANUP:
 void colorprint(const char *name, int64_t nr, const char *line, int start, int end, int len,
         const char *labbr, const char *rabbr) 
 {
-    printf("\033[1;35m%s\033[0m:\033[1;32m%lld\033[0m:%s%.*s\033[1;31m%.*s\033[0m%.*s%s\n",
+    printf("\033[0;35m%s\033[0m:\033[1;32m%lld\033[0m:%s%.*s\033[1;31m%.*s\033[0m%.*s%s\n",
             name, nr,
             labbr,
             start, line, end - start, line + start, len - end, line + end,
@@ -175,6 +195,43 @@ bool grep_callback(const struct grepline *l)
     return true;
 }
 
+void load_ignore_file(const char *path)
+{
+    char * line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    FILE * fp = fopen(path, "r");
+    if (fp == NULL) {
+        ERR("failed to load ignore file %s", path);
+        return;
+    }
+
+    LOG("* load ignore file %s\n", path);
+    while ((read = getline(&line, &len, fp)) != -1) {
+        if (read < 2 || line[0] == '#' || (line[0] == '!' && read == 2))
+            continue;
+        line[--read] = 0;
+        char *buf = (char *)malloc(read + 10);
+        bool negate = false;
+        if (line[0] == '!') {
+            memcpy(buf, line + 1, read);
+            negate = true;
+        } else {
+            memcpy(buf, line, read + 1);
+        }
+        if (buf[strlen(buf) - 1] == '/')
+            memcpy(buf + strlen(buf), "**", 3);
+        if (buf[0] == '/')
+            memcpy(buf, buf + 1, strlen(buf));
+        stack_push(negate ? &flags.negate_excludes : &flags.excludes, buf);
+        LOG("* %sexclude pattern %s from ignore file\n", !negate ? "" : "negate ", buf, path);
+    }
+
+    fclose(fp);
+    if (line)
+        free(line);
+}
+
 void usage()
 {
     printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
@@ -205,18 +262,17 @@ int main(int argc, char **argv)
     }
 
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
-        printf("mutex init has failed\n"); 
+        ERR("simdgrep can't start");
         return 0; 
     } 
     flags.verbose = flags.fixed_string = false;
     flags.color = isatty(STDOUT_FILENO);
-    flags.ignore_case = flags.color = flags.use_lock = true;
+    flags.ignore_case = flags.use_lock = true;
     flags.line_size = 65536;
     flags.quiet = 0;
     flags.xbytes = 1e8;
-    flags.num_includes = flags.num_excludes = 0;
-    flags.includes = (const char **)malloc(sizeof(const char *) * argc);
-    flags.excludes = (const char **)malloc(sizeof(const char *) * argc);
+    flags.negate_excludes.root = flags.excludes.root = flags.includes.root = NULL;
+    flags.negate_excludes.count = flags.excludes.count = flags.includes.count = 0;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
 
     struct stack s;
@@ -278,7 +334,7 @@ int main(int argc, char **argv)
     } else {
         g.rx_info = rx_extract_plain(expr);
         if (g.rx_info.unsupported_escape) {
-            ERR("pattern with unsupported escape at '%s'\n", g.rx_info.unsupported_escape);
+            ERR("pattern with unsupported escape at '%s'", g.rx_info.unsupported_escape);
             goto EXIT;
         }
     }
@@ -317,17 +373,17 @@ int main(int argc, char **argv)
         if (strlen(name) == 0)
             continue;
         if (name[0] == '-') {
-            flags.excludes[flags.num_excludes++] = name + 1;
+            stack_push(&flags.excludes, strdup(name + 1));
             LOG("* exclude pattern %s\n", name + 1);
-            continue;
-        }
-        if (name[0] == '+') {
-            flags.includes[flags.num_includes++] = name + 1;
+        } else if (name[0] == '+') {
+            stack_push(&flags.includes, strdup(name + 1));
             LOG("* include pattern %s\n", name + 1);
-            continue;
+        } else if (name[0] == '^') {
+            load_ignore_file(name + 1);
+        } else {
+            LOG("* search %s\n", name);
+            stack_push(&s, strdup(name));
         }
-        LOG("* search %s\n", name);
-        stack_push(&s, strdup(name));
     }
     if (s.count == 0) {
         stack_push(&s, strdup("."));
@@ -355,8 +411,9 @@ CLEANUP:
     grepper_free(&g);
 
 EXIT:
-    free(flags.includes);
-    free(flags.excludes);
+    stack_free(&flags.includes);
+    stack_free(&flags.excludes);
+    stack_free(&flags.negate_excludes);
     pthread_mutex_destroy(&flags.lock); 
     return 0;
 }
