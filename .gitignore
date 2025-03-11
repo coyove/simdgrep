@@ -6,3 +6,4 @@ cpuprofile
 out.*
 simdgrep
 test*.txt
+*.dSYM

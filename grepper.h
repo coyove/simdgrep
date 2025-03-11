@@ -29,20 +29,14 @@
 
 #endif
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
+static int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
+static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 
 #ifdef __MAX_BRUTE_FORCE_LENGTH
 static const int MAX_BRUTE_FORCE_LENGTH = __MAX_BRUTE_FORCE_LENGTH;
 #else
-static const int MAX_BRUTE_FORCE_LENGTH = 16;
+static const int MAX_BRUTE_FORCE_LENGTH = 0;
 #endif
-
-static int64_t now() {
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    return start.tv_sec * 1000000000L + start.tv_nsec;
-}
 
 static const int BINARY = 0;
 static const int BINARY_TEXT = 1;
@@ -51,10 +45,10 @@ static const int BINARY_IGNORE = 2;
 struct grepper_ctx;
 
 struct rx_pattern_info {
-    char *fixed_patterns;
-    int fixed_len;
+    bool use_regex;
+    regex_t engine;
     bool fixed_start;
-    bool pure;
+    char *error;
     const char *unsupported_escape;
 };
 
@@ -69,27 +63,22 @@ struct grepline {
     int match_end;
 };
 
-struct _grepper_file {
-    int after_lines;
-    struct grepper *next_g;
-    bool (*callback)(const struct grepline *);
-};
-
 struct grepper {
     char *find;
     char *findupper;
     char *findlower;
+    bool ignore_case;
     int binary_mode;
     int len;
-    int table[256];
+    int after_lines;
     uint64_t _Atomic falses;
-    bool ignore_case;
+    bool (*callback)(const struct grepline *);
+
+    int _table[256];
     uint8_t _case_mask8;
     uint16_t _case_mask16;
-    bool use_regex;
-    regex_t rx;
-    struct rx_pattern_info rx_info;
-    struct _grepper_file file;
+    struct rx_pattern_info rx;
+    struct grepper *next_g;
 };
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case);
@@ -100,7 +89,7 @@ void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
-int grepper_file(struct grepper *, const char *, int64_t, struct grepper_ctx *);
+int grepper_file(struct grepper *, const char *, struct grepper_ctx *);
 
 int64_t countbyte(const char *s, const char *end, uint8_t c);
 
@@ -108,17 +97,18 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
-struct rx_pattern_info rx_extract_plain(const char *s);
+void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 
 // line buffer
 //
 struct linebuf {
     int fd;
-    int lines;
+    int64_t lines;
     int len;
     int datalen;
     int buflen;
     bool overflowed;
+    bool ignore_counting_lines;
     bool is_binary;
     char *buffer;
 };
@@ -138,9 +128,17 @@ static void buffer_init(struct linebuf *l, int line_size)
     l->buffer = (char *)malloc(line_size + 1);
 }
 
+static void buffer_reset(struct linebuf *l, int fd)
+{
+    l->fd = fd;
+    l->overflowed = l->ignore_counting_lines = false;
+    l->lines = l->len = l->datalen = 0;
+}
+
 static void buffer_fill(struct linebuf *l, const char *path)
 {
-    l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
+    if (!l->ignore_counting_lines) 
+        l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
 
     // Move tailing bytes forward.
     memcpy(l->buffer, l->buffer + l->len, l->datalen - l->len);
@@ -166,6 +164,12 @@ static void buffer_fill(struct linebuf *l, const char *path)
 static void buffer_free(struct linebuf *l)
 {
     free(l->buffer);
+}
+
+static int64_t now() {
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    return start.tv_sec * 1000000000L + start.tv_nsec;
 }
 
 #endif
