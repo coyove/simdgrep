@@ -83,9 +83,16 @@ NEXT:
         goto CLEANUP;
     }
 
+    const char *rule, *source;
     size_t ln = strlen(t->name);
     ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
     if (S_ISDIR(ss.st_mode)) {
+        if (!matcher_match(t->m, t->name, &rule, &source)) {
+            atomic_fetch_add(&flags.ignores, 1);
+            LOG("ignore directory %s due to rule (%s:%s)\n", t->name, source, rule);
+            goto CLEANUP;
+        }
+
         struct matcher *root = t->m;
         if(!flags.no_ignore) {
             struct matcher *m = matcher_load_ignore_file(t->name);
@@ -119,9 +126,7 @@ NEXT:
         }
         closedir(dir);
     } else if (S_ISREG(ss.st_mode) && ss.st_size > 0) {
-        const char *rule, *source;
-        bool incl = matcher_match(t->m, t->name, &rule, &source);
-        if (incl) {
+        if (matcher_match(t->m, t->name, &rule, &source)) {
             p->current_file = t->name;
             int res = grepper_file(&g, t->name, &p->ctx);
             if (res != 0) {
@@ -346,6 +351,7 @@ int main(int argc, char **argv)
     } else {
         LOG("* respected %d .gitignore, %lld files ignored\n", num_ignores, flags.ignores);
     }
+    ERR("%lld falses", g.falses);
 
 EXIT:
     grepper_free(&g);

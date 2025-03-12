@@ -77,6 +77,7 @@ struct grepper {
     int _table[256];
     uint8_t _case_mask8;
     uint16_t _case_mask16;
+    uint32_t _case_mask32;
     struct rx_pattern_info rx;
     struct grepper *next_g;
 };

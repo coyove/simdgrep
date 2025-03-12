@@ -201,6 +201,49 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
     return count;
 }
 
+const char *index4bytes(const char *s, const char *end, uint32_t v4, uint8_t mask, uint32_t mask4)
+{
+    v4 &= mask4;
+    uint16_t b = v4 >> 16, a = v4;
+    uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
+    uint16x8_t teeth = vdupq_n_u16(0x0F0F);
+    uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 2, 3, 3, 4, 4, 5, 5, 6};
+    uint8x16_t shuffle2 = {4, 5, 5, 6, 6, 7, 7, 8, 6, 7, 7, 8, 8, 9, 9, 10};
+    // printf("%b\n", v4);
+
+    while (s <= end - 16) {
+        uint8x16_t p = vld1q_u8((const uint8_t *)s);
+
+        uint16x8_t haystack1 = vreinterpretq_u16_u8(vqtbl1q_u8(p, shuffle1));
+        haystack1 = vandq_u16(haystack1, teeth);
+        uint16x4_t res1 = vorr_u16(vget_low_u16(haystack1), vshl_n_u16(vget_high_u16(haystack1), 4));
+
+        uint16x8_t haystack2 = vreinterpretq_u16_u8(vqtbl1q_u8(p, shuffle2));
+        haystack2 = vandq_u16(haystack2, teeth);
+        uint16x4_t res2 = vorr_u16(vget_low_u16(haystack2), vshl_n_u16(vget_high_u16(haystack2), 4));
+
+        uint16x8_t res = vcombine_u16(res1, res2);
+        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&res + i)); printf("\n");
+        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&needle + i)); printf("\n");
+
+        uint16x8_t mask = vceqq_u16(res, needle);
+        uint8x8_t r = vshrn_n_u16(mask, 1);
+        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
+        if (matches > 0) {
+            int one = __builtin_ctzll(matches) / 8;
+            return s + one;
+        }
+        s += 8;
+    }
+
+    while (s < end - 3) {
+        if ((*(uint32_t *)s & mask4) == v4)
+            return s;
+        s++;
+    }
+    return 0;
+}
+
 const char *index2bytes(const char *s, const char *end, uint16_t v, uint8_t mask, uint16_t mask2)
 {
     uint16x8_t needle = vdupq_n_u16(v);
@@ -317,6 +360,7 @@ void grepper_init(struct grepper *g, const char *find, bool ignore_case)
     g->next_g = 0;
     g->_case_mask8 = ignore_case ? 0xDF : 0xFF;
     g->_case_mask16 = ignore_case ? 0xDFDF : 0xFFFF;
+    g->_case_mask32 = ignore_case ? 0xDFDFDFDF : 0xFFFFFFFF;
 }
 
 struct grepper *grepper_add(struct grepper *g, const char *find)
@@ -342,6 +386,25 @@ void grepper_free(struct grepper *g)
         regfree(&g->rx.engine);
     if (g->rx.error)
         free(g->rx.error);
+}
+
+static const char *indexcasestr_long4(struct grepper *g, const char *s, const char *end)
+{
+    int64_t lf = g->len;
+    uint32_t v = *(uint32_t *)(g->find + lf - 4);
+    while (s <= end - lf) {
+        s = index4bytes(s + lf - 4, end, v, g->_case_mask8, g->_case_mask32);
+        if (!s)
+            return s;
+        s -= lf - 4;
+        int j = lf - 1;
+        while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
+            --j;
+        if (j < 0)
+            return s;
+		s += MAX(1, j - g->_table[s[j]]);
+    }
+	return 0;
 }
 
 static const char *indexcasestr_long(struct grepper *g, const char *s, const char *end)
@@ -382,8 +445,26 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
             indexbyte(s, end, *g->find);
     }
 
-    if (g->len >= MAX_BRUTE_FORCE_LENGTH)
-        return indexcasestr_long(g, s, end);
+    if (1 && g->len >= MAX_BRUTE_FORCE_LENGTH)
+        return indexcasestr_long4(g, s, end);
+
+    if (1) {
+        uint32_t v = *(uint32_t *)g->find;
+        while (s <= end - g->len) {
+            s = index4bytes(s, end, v, g->_case_mask8, g->_case_mask32);
+            if (!s)
+                return s;
+            for (int i = 0; i < g->len; i++) {
+                if (*(s + i) != g->findupper[i] && *(s + i) != g->findlower[i])
+                    goto FALSES4;
+            }
+            return s;
+FALSES4:
+            atomic_fetch_add(&g->falses, 1);
+            s++;
+        }
+        return 0;
+    }
 
     uint16_t v = *(uint16_t *)g->find & g->_case_mask16;
     int adv = (v >> 8) == (v & 0xFF) ? 1 : 2;
@@ -427,6 +508,11 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
 
 int grepper_file(struct grepper *g, const char *path, struct grepper_ctx *ctx)
 {
+    // const char *zzz = "0123456789abcdefghijklmnop";
+    // const char *zzzres = index4bytes(zzz, zzz + strlen(zzz), 0x16151413, 0xDF, 0xDFDFDFDF);
+    // printf("%s\n", zzzres);
+    // exit(1);
+
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
