@@ -248,30 +248,28 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
     return count;
 }
 
-const char *index4bytes(const char *s, const char *end, uint32_t v4, uint8_t mask, uint32_t mask4)
+const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t mask4)
 {
     uint16_t b = v4 >> 16, a = v4;
     uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
-    uint16x8_t teeth = vdupq_n_u16(0x0F0F);
+    uint8x16_t teeth = vdupq_n_u8(0x0F);
     uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 2, 3, 3, 4, 4, 5, 5, 6};
     uint8x16_t shuffle2 = {4, 5, 5, 6, 6, 7, 7, 8, 6, 7, 7, 8, 8, 9, 9, 10};
     // printf("%b\n", v4);
 
     while (s <= end - 16) {
-        uint8x16_t p = vld1q_u8((const uint8_t *)s);
+        uint8x16_t p = vandq_u8(vld1q_u8((const uint8_t *)s), teeth);
 
-        uint16x8_t haystack1 = vreinterpretq_u16_u8(vqtbl1q_u8(p, shuffle1));
-        haystack1 = vandq_u16(haystack1, teeth);
-        uint16x4_t res1 = vorr_u16(vget_low_u16(haystack1), vshl_n_u16(vget_high_u16(haystack1), 4));
+        uint8x16_t haystack1 = vqtbl1q_u8(p, shuffle1);
+        uint16x4_t res1 = vreinterpret_u16_u8(vsli_n_u8(vget_low_u8(haystack1), vget_high_u8(haystack1), 4));
 
-        uint16x8_t haystack2 = vreinterpretq_u16_u8(vqtbl1q_u8(p, shuffle2));
-        haystack2 = vandq_u16(haystack2, teeth);
-        uint16x4_t res2 = vorr_u16(vget_low_u16(haystack2), vshl_n_u16(vget_high_u16(haystack2), 4));
+        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&haystack1 + i)); printf("\n");
+        // for (int i = 0; i < 4; i++) printf("%04x ", *((uint16_t *)&res1 + i)); printf("\n");
+
+        uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
+        uint16x4_t res2 = vreinterpret_u16_u8(vsli_n_u8(vget_low_u8(haystack2), vget_high_u8(haystack2), 4));
 
         uint16x8_t res = vcombine_u16(res1, res2);
-        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&res + i)); printf("\n");
-        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&needle + i)); printf("\n");
-
         uint16x8_t mask = vceqq_u16(res, needle);
         uint8x8_t r = vshrn_n_u16(mask, 1);
         uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
@@ -439,7 +437,7 @@ static const char *indexcasestr_long4(struct grepper *g, const char *s, const ch
     int64_t lf = g->len;
     uint32_t v = *(uint32_t *)(g->find + lf - 4);
     while (s <= end - lf) {
-        s = index4bytes(s + lf - 4, end, v, g->_case_mask8, g->_case_mask32);
+        s = index4bytes(s + lf - 4, end, v, g->_case_mask32);
         if (!s)
             return s;
         s -= lf - 4;
@@ -491,13 +489,15 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
             indexbyte(s, end, *g->find);
     }
 
-    if (0 && g->len >= MAX_BRUTE_FORCE_LENGTH)
-        return indexcasestr_long(g, s, end);
+    if (g->len >= 4)
+        return indexcasestr_long4(g, s, end);
 
-    if (1) {
+    return indexcasestr_long(g, s, end);
+
+    if (0) {
         uint32_t v = *(uint32_t *)g->find;
         while (s <= end - g->len) {
-            s = index4bytes(s, end, v, g->_case_mask8, g->_case_mask32);
+            s = index4bytes(s, end, v, g->_case_mask32);
             if (!s)
                 return s;
             for (int i = 0; i < g->len; i++) {
@@ -552,20 +552,20 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
-int grepper_file(struct grepper *g, const char *path, struct grepper_ctx *ctx)
+int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
 {
     // const char *zzz = "0123456789abcdefghijklmnop0123456789abcdef";
     // const char *zzzres = index4bytes(zzz, zzz + strlen(zzz), *(uint32_t *)"ijkl", 0xDF, 0xDFDFDFDF);
     // printf("%s\n", zzzres);
     // exit(1);
 
-    int fd = open(path, O_RDONLY);
+    int fd = open(ctx->file_name, O_RDONLY);
     if (fd < 0)
         return -1;
 
     struct linebuf *lb = &ctx->lbuf;
     buffer_reset(lb, fd);
-    buffer_fill(lb, path);
+    buffer_fill(lb, ctx->file_name);
 
     lb->is_binary = indexbyte(lb->buffer, lb->buffer + MIN(lb->len, 1024), 0);
     if (lb->is_binary) {
@@ -675,7 +675,9 @@ NG:
 
             s = line_end + 1;
         }
-        buffer_fill(lb, path);
+        if (lb->read >= ctx->file_size)
+            break;
+        buffer_fill(lb, ctx->file_name);
     }
  
 CLEANUP:

@@ -38,12 +38,12 @@ struct payload {
     pthread_t thread;
     int i;
     uint32_t _Atomic *sigs;
-    const char *current_file;
     struct grepper_ctx ctx;
 };
 
 struct task {
     char *name;
+    struct stat stat;
     struct matcher *m;
 };
 
@@ -56,6 +56,7 @@ struct task *new_task(char *name, struct matcher *m)
 }
 
 struct stack tasks;
+struct stack files;
 struct stack matchers;
 struct grepper g;
 
@@ -63,34 +64,49 @@ void *push(void *arg)
 {
     struct payload *p = (struct payload *)arg;
     struct task *t;
+    struct stat ss;
+    const char *rule, *source;
+
 NEXT:
     if (!stack_pop(&tasks, (void **)&t)) {
-        p->sigs[p->i] = 0;
-        for (int i = 0; i < flags.num_threads; i++) {
-            if (atomic_load(&p->sigs[i])) {
-                struct timespec req = { .tv_sec = 0, .tv_nsec = 10000000 /* 10ms */ };
-                nanosleep(&req, NULL);
-                goto NEXT;
+        if (!stack_pop(&files, (void **)&t)) {
+            p->sigs[p->i] = 0;
+            for (int i = 0; i < flags.num_threads; i++) {
+                if (atomic_load(&p->sigs[i])) {
+                    struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 /* 1ms */ };
+                    nanosleep(&req, NULL);
+                    goto NEXT;
+                }
             }
+            return 0;
         }
-        return 0;
+        atomic_store(&p->sigs[p->i], 1);
+
+        p->ctx.file_name = t->name;
+        p->ctx.file_size = t->stat.st_size;
+        int res = grepper_file(&g, &p->ctx);
+        if (res != 0) {
+            ERR("read %s", t->name);
+        }
+        if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
+            WARN("%s has long line >%dK, matches may be incomplete\n", t->name, flags.line_size / 1024);
+        }
+        goto CLEANUP_TASK;
     }
     atomic_store(&p->sigs[p->i], 1);
 
-    struct stat ss;
     if (lstat(t->name, &ss) != 0) {
         ERR("stat %s", t->name);
-        goto CLEANUP;
+        goto CLEANUP_TASK;
     }
 
-    const char *rule, *source;
-    size_t ln = strlen(t->name);
-    ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
     if (S_ISDIR(ss.st_mode)) {
+        size_t ln = strlen(t->name);
+        ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
         if (!matcher_match(t->m, t->name, &rule, &source)) {
             atomic_fetch_add(&flags.ignores, 1);
             LOG("ignore directory %s due to rule (%s:%s)\n", t->name, source, rule);
-            goto CLEANUP;
+            goto CLEANUP_TASK;
         }
 
         struct matcher *root = t->m;
@@ -107,7 +123,7 @@ NEXT:
         DIR *dir = opendir(t->name);
         if (dir == NULL) {
             ERR("open %s", t->name);
-            goto CLEANUP;
+            goto CLEANUP_TASK;
         }
         struct dirent *dirent;
         while ((dirent = readdir(dir)) != NULL) {
@@ -126,22 +142,16 @@ NEXT:
         }
         closedir(dir);
     } else if (S_ISREG(ss.st_mode) && ss.st_size > 0) {
+        t->stat = ss;
         if (matcher_match(t->m, t->name, &rule, &source)) {
-            p->current_file = t->name;
-            int res = grepper_file(&g, t->name, &p->ctx);
-            if (res != 0) {
-                ERR("read %s", t->name);
-            }
-            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
-                WARN("%s has long line >%dK, matches may be incomplete\n", t->name, flags.line_size / 1024);
-            }
-        } else {
-            atomic_fetch_add(&flags.ignores, 1);
-            LOG("ignore file %s due to rule (%s:%s)\n", t->name, source, rule);
+            stack_push(&files, t);
+            goto NEXT;
         }
+        atomic_fetch_add(&flags.ignores, 1);
+        LOG("ignore file %s due to rule (%s:%s)\n", t->name, source, rule);
     }
 
-CLEANUP:
+CLEANUP_TASK:
     free(t->name);
     free(t);
     goto NEXT;
@@ -150,7 +160,7 @@ CLEANUP:
 bool grep_callback(const struct grepline *l)
 {
     struct payload *p = (struct payload *)l->ctx->memo;
-    const char *name = rel_path(flags.cwd, p->current_file);
+    const char *name = rel_path(flags.cwd, l->ctx->file_name);
     LOCK();
     if (l->ctx->lbuf.is_binary && g.binary_mode == BINARY) {
         printf("%s: binary file matches\n", name);
@@ -339,8 +349,9 @@ int main(int argc, char **argv)
         buffer_free(&payloads[i].ctx.lbuf);
     }
 
-    int num_files = stack_free(&tasks);
-    LOG("* searched %d files\n", num_files);
+    int num_walks = stack_free(&tasks);
+    int num_files = stack_free(&files);
+    LOG("* walked %d entries, searched %d files\n", num_walks, num_files);
     //
 
     for (struct stacknode *n = matchers.root; n; n = n->next) 

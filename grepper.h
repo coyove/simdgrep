@@ -45,8 +45,8 @@ static const int MAX_BRUTE_FORCE_LENGTH = 0;
 struct grepper_ctx;
 
 struct rx_pattern_info {
-    bool use_regex;
     regex_t engine;
+    bool use_regex;
     bool fixed_start;
     char *error;
     const char *unsupported_escape;
@@ -90,7 +90,7 @@ void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
-int grepper_file(struct grepper *, const char *, struct grepper_ctx *);
+int grepper_file(struct grepper *, struct grepper_ctx *);
 
 int64_t countbyte(const char *s, const char *end, uint8_t c);
 
@@ -105,6 +105,7 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 struct linebuf {
     int fd;
     int64_t lines;
+    int64_t read;
     int len;
     int datalen;
     int buflen;
@@ -116,6 +117,8 @@ struct linebuf {
 
 struct grepper_ctx {
     void *memo;
+    int64_t file_size;
+    const char *file_name;
     struct linebuf lbuf;
 };
 
@@ -131,6 +134,7 @@ static void buffer_init(struct linebuf *l, int line_size)
 
 static void buffer_reset(struct linebuf *l, int fd)
 {
+    l->read = 0;
     l->fd = fd;
     l->overflowed = l->ignore_counting_lines = false;
     l->lines = l->len = l->datalen = 0;
@@ -151,6 +155,7 @@ static void buffer_fill(struct linebuf *l, const char *path)
         return;
     }
 
+    l->read += n;
     l->len += n;
     l->datalen += n;
 
