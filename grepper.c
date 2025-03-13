@@ -86,6 +86,53 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c)
     return count;
 }
 
+const char *index4bytes(const char *s, const char *end, uint32_t v4, uint8_t mask, uint32_t mask4)
+{
+    uint16_t b = v4 >> 16, a = v4;
+    __m256i needle = _mm256_set1_epi16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
+    __m256i teeth  = _mm256_set1_epi16(0x0F0F);
+    __m256i shuffle = _mm256_set_epi8(
+            10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2,
+            8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0
+            );
+    // printf("%b\n", v4);
+
+    while (s <= end - 20) {
+        __m256i p1 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i *)s));
+        p1 = _mm256_and_si256(_mm256_shuffle_epi8(p1, shuffle), teeth);
+        __m128i h1 = _mm256_extracti128_si256(p1, 1);
+        __m128i h2 = _mm256_extracti128_si256(p1, 0);
+        __m128i res1 = _mm_or_si128(_mm_slli_epi16(h1, 4), h2);
+
+        p1 = _mm256_broadcastsi128_si256(_mm_loadu_si128((__m128i *)(s + 4)));
+        p1 = _mm256_and_si256(_mm256_shuffle_epi8(p1, shuffle), teeth);
+        h1 = _mm256_extracti128_si256(p1, 1);
+        h2 = _mm256_extracti128_si256(p1, 0);
+        __m128i res2 = _mm_or_si128(_mm_slli_epi16(h1, 4), h2);
+
+        __m256i res = _mm256_set_m128i(res2, res1);
+        // for (int i = 0; i < 32; i++) printf("%02x ", *((uint8_t *)&res + i)); printf("\n");
+        // for (int i = 0; i < 32; i++) printf("%02x ", *((uint8_t *)&needle + i)); printf("\n");
+
+        __m256i mask = _mm256_cmpeq_epi16(res, needle);
+        uint32_t matches = _mm256_movemask_epi8(mask);
+        // printf("%08x\n", matches);
+        if (matches) {
+            int one = __builtin_ctz(matches) / 2;
+            return s + one;
+        }
+        s += 16;
+    }
+
+    while (s < end - 3) {
+        if ((*(uint32_t *)s & mask4) == v4)
+            return s;
+        s++;
+    }
+    return 0;
+}
+
+
 const char *index2bytes(const char *s, const char *end, uint16_t v, uint8_t mask, uint16_t mask2)
 {
     __m256i needle = _mm256_set1_epi16(v);
@@ -203,7 +250,6 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
 
 const char *index4bytes(const char *s, const char *end, uint32_t v4, uint8_t mask, uint32_t mask4)
 {
-    v4 &= mask4;
     uint16_t b = v4 >> 16, a = v4;
     uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
     uint16x8_t teeth = vdupq_n_u16(0x0F0F);
@@ -445,8 +491,8 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
             indexbyte(s, end, *g->find);
     }
 
-    if (1 && g->len >= MAX_BRUTE_FORCE_LENGTH)
-        return indexcasestr_long4(g, s, end);
+    if (0 && g->len >= MAX_BRUTE_FORCE_LENGTH)
+        return indexcasestr_long(g, s, end);
 
     if (1) {
         uint32_t v = *(uint32_t *)g->find;
@@ -508,8 +554,8 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
 
 int grepper_file(struct grepper *g, const char *path, struct grepper_ctx *ctx)
 {
-    // const char *zzz = "0123456789abcdefghijklmnop";
-    // const char *zzzres = index4bytes(zzz, zzz + strlen(zzz), 0x16151413, 0xDF, 0xDFDFDFDF);
+    // const char *zzz = "0123456789abcdefghijklmnop0123456789abcdef";
+    // const char *zzzres = index4bytes(zzz, zzz + strlen(zzz), *(uint32_t *)"ijkl", 0xDF, 0xDFDFDFDF);
     // printf("%s\n", zzzres);
     // exit(1);
 

@@ -38,9 +38,9 @@ static const int MAX_BRUTE_FORCE_LENGTH = __MAX_BRUTE_FORCE_LENGTH;
 static const int MAX_BRUTE_FORCE_LENGTH = 0;
 #endif
 
-static const int BINARY = 0;
-static const int BINARY_TEXT = 1;
-static const int BINARY_IGNORE = 2;
+#define BINARY 0
+#define BINARY_TEXT 1
+#define BINARY_IGNORE 2
 
 struct grepper_ctx;
 
