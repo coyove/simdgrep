@@ -86,7 +86,7 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c)
     return count;
 }
 
-const char *index4bytes(const char *s, const char *end, uint32_t v4, uint8_t mask, uint32_t mask4)
+const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t mask4)
 {
     uint16_t b = v4 >> 16, a = v4;
     __m256i needle = _mm256_set1_epi16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
