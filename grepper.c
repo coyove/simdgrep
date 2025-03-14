@@ -253,23 +253,19 @@ const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t ma
     uint16_t b = v4 >> 16, a = v4;
     uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
     uint8x16_t teeth = vdupq_n_u8(0x0F);
-    uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 2, 3, 3, 4, 4, 5, 5, 6};
-    uint8x16_t shuffle2 = {4, 5, 5, 6, 6, 7, 7, 8, 6, 7, 7, 8, 8, 9, 9, 10};
+    uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8};
+    uint8x16_t shuffle2 = {2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10};
     // printf("%b\n", v4);
 
     while (s <= end - 16) {
         uint8x16_t p = vandq_u8(vld1q_u8((const uint8_t *)s), teeth);
 
         uint8x16_t haystack1 = vqtbl1q_u8(p, shuffle1);
-        uint16x4_t res1 = vreinterpret_u16_u8(vsli_n_u8(vget_low_u8(haystack1), vget_high_u8(haystack1), 4));
-
+        uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
         // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&haystack1 + i)); printf("\n");
         // for (int i = 0; i < 4; i++) printf("%04x ", *((uint16_t *)&res1 + i)); printf("\n");
 
-        uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
-        uint16x4_t res2 = vreinterpret_u16_u8(vsli_n_u8(vget_low_u8(haystack2), vget_high_u8(haystack2), 4));
-
-        uint16x8_t res = vcombine_u16(res1, res2);
+        uint16x8_t res = vreinterpretq_u16_u8(vsliq_n_u8(haystack1, haystack2, 4));
         uint16x8_t mask = vceqq_u16(res, needle);
         uint8x8_t r = vshrn_n_u16(mask, 1);
         uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
