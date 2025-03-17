@@ -103,19 +103,20 @@ NEXT:
     if (S_ISDIR(ss.st_mode)) {
         size_t ln = strlen(t->name);
         ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
-        if (!matcher_match(t->m, t->name, &rule, &source)) {
+        if (!matcher_match(t->m, t->name, true, &rule, &source)) {
             atomic_fetch_add(&flags.ignores, 1);
-            LOG("ignore directory %s due to rule (%s:%s)\n", t->name, source, rule);
+            LOG("ignore directory %s due to rule (%s:%s:%s)\n", t->name, source, matcher_explain_rule(rule[0]), rule + 1);
             goto CLEANUP_TASK;
         }
 
         struct matcher *root = t->m;
-        if(!flags.no_ignore) {
+        if (!flags.no_ignore) {
             struct matcher *m = matcher_load_ignore_file(t->name);
             if (m) {
                 LOG("load ignore file from %s\n", m->root);
                 stack_push(&matchers, m);
                 m->parent = root;
+                m->top = root->top;
                 root = m;
             }
         }
@@ -143,12 +144,12 @@ NEXT:
         closedir(dir);
     } else if (S_ISREG(ss.st_mode) && ss.st_size > 0) {
         t->stat = ss;
-        if (matcher_match(t->m, t->name, &rule, &source)) {
+        if (matcher_match(t->m, t->name, false, &rule, &source)) {
             stack_push(&files, t);
             goto NEXT;
         }
         atomic_fetch_add(&flags.ignores, 1);
-        LOG("ignore file %s due to rule (%s:%s)\n", t->name, source, rule);
+        LOG("ignore file %s due to rule (%s:%s:%s)\n", t->name, source, matcher_explain_rule(rule[0]), rule + 1);
     }
 
 CLEANUP_TASK:
@@ -159,6 +160,7 @@ CLEANUP_TASK:
 
 bool grep_callback(const struct grepline *l)
 {
+    return true;
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = rel_path(flags.cwd, l->ctx->file_name);
     LOCK();
@@ -254,6 +256,7 @@ int main(int argc, char **argv)
     flags.quiet = 0;
     flags.xbytes = 1e8;
     memset(&flags.default_matcher, 0, sizeof(struct matcher));
+    flags.default_matcher.top = &flags.default_matcher;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));
 
@@ -322,12 +325,12 @@ int main(int argc, char **argv)
         const char *name = argv[arg_files];
         if (strlen(name) == 0)
             continue;
-        if (name[0] == '-') {
-            stack_push(&flags.default_matcher.excludes, strdup(name + 1));
-            LOG("* exclude pattern %s\n", name + 1);
-        } else if (name[0] == '+') {
-            stack_push(&flags.default_matcher.includes, strdup(name + 1));
-            LOG("* include pattern %s\n", name + 1);
+        if (name[0] == '+') {
+            matcher_add_rule(&flags.default_matcher, name + 1, name + strlen(name), true);
+            LOG("* add include pattern %s\n", name + 1);
+        } else if (name[0] == '-') {
+            matcher_add_rule(&flags.default_matcher, name + 1, name + strlen(name), false);
+            LOG("* add exclude pattern %s\n", name + 1);
         } else {
             LOG("* search %s\n", name);
             stack_push(&tasks, new_task(join_cwd_or_die(name), &flags.default_matcher));

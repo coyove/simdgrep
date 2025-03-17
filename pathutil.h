@@ -8,12 +8,18 @@
 
 #define PATH_SEP '/'
 
+#define _INAME 1
+#define _IPATH 2
+#define _IDIR 3
+#define _ISIMPLE 0x80
+
 struct matcher {
     char *root;
     struct stack includes;
     struct stack excludes;
     struct stack negate_excludes;
     struct matcher *parent;
+    struct matcher *top;
 };
 
 const char *rel_path(const char *a, const char *b)
@@ -49,40 +55,72 @@ char *join_path(const char *cwd, const char *b)
     return resolved;
 }
 
-bool matcher_match(struct matcher *m, const char *name, const char **rule, const char **source)
+bool _matcher_wildmatch(const char *pattern, const char *name, bool is_dir)
+{
+    int flag = pattern[0] & 0x7F;
+    if (flag == _IDIR) {
+        if (!is_dir)
+            return false;
+        flag = _INAME;
+    }
+    if (flag == _INAME) {
+        const char *s = strrchr(name, '/');
+        name = s ? s + 1 : name;
+    }
+    if (pattern[0] & _ISIMPLE) {
+        const char *f = strstr(name, pattern + 1);
+        if (f == NULL)
+            return false;
+        if (f > name && *(f - 1) != '/')
+            return false;
+        f += strlen(pattern + 1);
+        if (*(f + 1) != 0 && *(f + 1) != '/')
+            return false;
+        return true;
+    }
+    return wildmatch(pattern + 1, name, 0) == WM_MATCH;
+}
+
+bool _matcher_negate_match(struct matcher *m, const char *name, bool is_dir)
+{
+    for (struct stacknode *n = m->negate_excludes.root; n; n = n->next) {
+        if (_matcher_wildmatch(n->value, name, is_dir))
+            return true;
+    }
+    if (m->parent)
+        return _matcher_negate_match(m->parent, name, is_dir);
+    return false;
+}
+
+bool matcher_match(struct matcher *m, const char *name, bool is_dir, const char **rule, const char **source)
 {
     const char *orig = name;
     if (m->root)
         name = rel_path(m->root, name);
 
-    bool incl = m->includes.count == 0;
-    for (struct stacknode *n = m->includes.root; n; n = n->next) {
-        if (wildmatch(n->value, name, 0) == WM_MATCH) {
+    bool incl = is_dir || m->top->includes.count == 0;
+    for (struct stacknode *n = m->top->includes.root; n; n = n->next) {
+        if (_matcher_wildmatch(n->value, name, is_dir)) {
             incl = true;
             break;
         }
     }
     if (!incl) {
-        *rule = "<include-rule>";
-        *source = "<include-source>";
+        *rule = *source = "<includes>";
         return false;
     }
 
     for (struct stacknode *n = m->excludes.root; n && incl; n = n->next) {
-        if (wildmatch(n->value, name, 0) == WM_MATCH) {
-            for (struct stacknode *n = m->negate_excludes.root; n; n = n->next) {
-                if (wildmatch(n->value, name, 0) == WM_MATCH)
-                    goto NEGATED;
+        if (_matcher_wildmatch(n->value, name, is_dir)) {
+            if (!_matcher_negate_match(m, name, is_dir)) {
+                *rule = n->value;
+                *source = m->root;
+                return false;
             }
-            *rule = n->value;
-            *source = m->root;
-            return false;
-NEGATED:
-            incl = true;
         }
     }
     if (m->parent)
-        return incl && matcher_match(m->parent, orig, rule, source);
+        return incl && matcher_match(m->parent, orig, is_dir, rule, source);
     return incl;
 }
 
@@ -98,6 +136,47 @@ void matcher_free(struct matcher *m)
     stack_free(&m->negate_excludes);
 }
 
+bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl)
+{
+    struct stack *ss = &m->excludes;
+    char *buf = (char *)malloc(end - l + 10);
+    while (*(end - 1) == ' ' || *(end - 1) == '\r' || *(end - 1) == '\n')
+        end--;
+
+    if (end <= l || l[0] == '#')
+        return false;
+
+    if (l[0] == '!') {
+        ss = &m->negate_excludes;
+        if (++l >= end)
+            return false;
+    }
+
+    if (l[0] == '/' && ++l >= end)
+        return false;
+
+    int simple = _ISIMPLE;
+    for (const char *i = l; i < end; i++) {
+        if ((*i == '*' || *i == '?' || *i == '[' || *i == ']') && (i == l || *(i - 1) != '\\')) {
+            simple = 0;
+            break;
+        }
+    }
+
+    const char *slash = strrchr(l, '/');
+    if (*(end - 1) == '/' && slash == end - 1) {
+        buf[0] = simple | _IDIR; // 'abc/': match directory only
+    } else if (!slash) {
+        buf[0] = simple | _INAME; // 'abc/def': match name
+    } else {
+        buf[0] = simple | _IPATH; // 'abc/**/def': match any path
+    }
+    memcpy(buf + 1, l, end - l);
+    buf[1 + end - l] = 0;
+    stack_push(incl ? &m->includes : ss, buf);
+    return true;
+}
+
 struct matcher *matcher_load_ignore_file(char *dir)
 {
     char *path = join_path(dir, ".gitignore");
@@ -109,38 +188,15 @@ struct matcher *matcher_load_ignore_file(char *dir)
 
     m->root = path;
 
-    char * line = NULL;
+    char *line = NULL;
     size_t len = 0;
     ssize_t read;
-    FILE * fp = fopen(path, "r");
+    FILE *fp = fopen(path, "r");
     if (fp == NULL)
         return NULL;
 
-    while ((read = getline(&line, &len, fp)) != -1) {
-        if (read < 2 || line[0] == '#' || (line[0] == '!' && read == 2))
-            continue;
-        line[--read] = 0;
-        char *buf = (char *)malloc(read + 10);
-        bool negate = false;
-        if (line[0] == '!') {
-            memcpy(buf, line + 1, read);
-            negate = true;
-        } else {
-            memcpy(buf, line, read + 1);
-        }
-
-        if (buf[strlen(buf) - 1] == '/')
-            memcpy(buf + strlen(buf), "**", 3);
-
-        if (buf[0] == '/')
-            memcpy(buf, buf + 1, strlen(buf));
-
-        if (negate) {
-            stack_push(&m->negate_excludes, buf);
-        } else {
-            stack_push(&m->excludes, buf);
-        }
-    }
+    while ((read = getline(&line, &len, fp)) > 0)
+        matcher_add_rule(m, line, line + read, false);
 
     fclose(fp);
     if (line)
@@ -154,6 +210,7 @@ struct matcher *matcher_load_ignore_file(char *dir)
 
 bool is_repo_bin(const char *dir, const char *name)
 {
+    return false;
     const char *dot = strrchr(dir, '.');
     if (!dot)
         return false;
@@ -162,6 +219,19 @@ bool is_repo_bin(const char *dir, const char *name)
     if (strcmp(dot, ".hg") == 0 && strcmp(name, "store") == 0)
         return true;
     return false;
+}
+
+
+const char *matcher_explain_rule(char flag)
+{
+    switch (flag & 0x7F) {
+    case _IDIR:
+        return "DIR";
+    case _INAME:
+        return "NAME";
+    default:
+        return "GLOB";
+    }
 }
 
 #endif

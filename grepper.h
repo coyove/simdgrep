@@ -129,7 +129,7 @@ static void buffer_init(struct linebuf *l, int line_size)
        Regex will use this buffer to do matching and temporarily place NULL at
        the end of line, reserve 1 byte for the last line of the file.
        */
-    l->buffer = (char *)malloc(line_size + 1);
+    l->buffer = (char *)malloc(line_size + 33);
 }
 
 static void buffer_reset(struct linebuf *l, int fd)
