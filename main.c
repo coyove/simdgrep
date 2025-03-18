@@ -66,6 +66,7 @@ void *push(void *arg)
     struct task *t;
     struct stat ss;
     const char *rule, *source;
+    char reason[1024];
 
 NEXT:
     if (!stack_pop(&tasks, (void **)&t)) {
@@ -103,9 +104,9 @@ NEXT:
     if (S_ISDIR(ss.st_mode)) {
         size_t ln = strlen(t->name);
         ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
-        if (!matcher_match(t->m, t->name, true, &rule, &source)) {
+        if (!matcher_match(t->m, t->name, true, reason, sizeof(reason))) {
             atomic_fetch_add(&flags.ignores, 1);
-            LOG("ignore directory %s due to rule (%s:%s:%s)\n", t->name, source, matcher_explain_rule(rule[0]), rule + 1);
+            LOG("ignore directory %s\n", reason);
             goto CLEANUP_TASK;
         }
 
@@ -144,12 +145,12 @@ NEXT:
         closedir(dir);
     } else if (S_ISREG(ss.st_mode) && ss.st_size > 0) {
         t->stat = ss;
-        if (matcher_match(t->m, t->name, false, &rule, &source)) {
+        if (matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
             stack_push(&files, t);
             goto NEXT;
         }
         atomic_fetch_add(&flags.ignores, 1);
-        LOG("ignore file %s due to rule (%s:%s:%s)\n", t->name, source, matcher_explain_rule(rule[0]), rule + 1);
+        LOG("ignore file %s\n", reason);
     }
 
 CLEANUP_TASK:
@@ -160,7 +161,6 @@ CLEANUP_TASK:
 
 bool grep_callback(const struct grepline *l)
 {
-    return true;
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = rel_path(flags.cwd, l->ctx->file_name);
     LOCK();
