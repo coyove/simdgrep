@@ -12,14 +12,13 @@
 
 #define LOCK() pthread_mutex_lock(&flags.lock)
 #define UNLOCK() pthread_mutex_unlock(&flags.lock)
-#define LOG(msg, ...) if (flags.verbose) { printf(msg, ##__VA_ARGS__); }
+#define LOG(msg, ...) if (flags.quiet < 0) { printf(msg, ##__VA_ARGS__); }
 #define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); \
     if (errno) fprintf(stderr, ": %s\n", strerror(errno)); else fprintf(stderr, "\n"); UNLOCK(); }
 #define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
 
 static struct _flags {
     char cwd[PATH_MAX];
-    bool verbose;
     bool ignore_case;
     bool color;
     bool fixed_string;
@@ -28,7 +27,6 @@ static struct _flags {
     int line_size;
     int quiet;
     int xbytes;
-    int after_lines;
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
@@ -112,12 +110,9 @@ NEXT:
 
         struct matcher *root = t->m;
         if (!flags.no_ignore) {
-            struct matcher *m = matcher_load_ignore_file(t->name);
+            struct matcher *m = matcher_load_ignore_file(t->name, root, &matchers);
             if (m) {
                 LOG("load ignore file from %s\n", m->root);
-                stack_push(&matchers, m);
-                m->parent = root;
-                m->top = root->top;
                 root = m;
             }
         }
@@ -130,7 +125,7 @@ NEXT:
         struct dirent *dirent;
         while ((dirent = readdir(dir)) != NULL) {
             const char *dname = dirent->d_name;
-            if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0 || is_repo_bin(t->name, dname))
+            if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0)
                 continue;
             char *buf = (char *)malloc(ln + 1 + strlen(dname) + 1);
             if (strcmp(t->name, ".") == 0) {
@@ -161,6 +156,7 @@ CLEANUP_TASK:
 
 bool grep_callback(const struct grepline *l)
 {
+    // return true;
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = rel_path(flags.cwd, l->ctx->file_name);
     LOCK();
@@ -175,7 +171,7 @@ bool grep_callback(const struct grepline *l)
             for (; j < l->len && ((uint8_t)l->line[j] >> 6) == 2; j++);
         }
 
-        if (l->is_afterline || !flags.color) {
+        if (l->is_ctxline || !flags.color) {
             printf("%s:"
                     "%lld:"
                     "%s"
@@ -230,26 +226,24 @@ void usage()
     printf("\t-qq\tsuppress error messages\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
-    printf("\t-x<NUM>\ttruncate lines longer than NUM bytes to make output compact\n");
-    printf("\t-A<NUM>\tprint NUM lines of trailing context\n");
-    printf("\t-M<NUM>\tdefine max line length in NUM kilobytes, any lines longer will be split,\n");
+    printf("\t-x NUM\ttruncate lines longer than NUM bytes to make output compact\n");
+    printf("\t-A NUM\tprint NUM lines of trailing context\n");
+    printf("\t-B NUM\tprint NUM lines of leading context\n");
+    printf("\t-C NUM\tcombine -A<NUM> and -B<NUM>\n");
+    printf("\t-M NUM\tdefine max line length in NUM kilobytes, any lines longer will be split,\n");
     printf("\t       \tthus matches may be incomplete at split points (default: 64K)\n");
-    printf("\t-J<NUM>\tNUM of threads for searching\n");
+    printf("\t-J NUM\tNUM of threads for searching\n");
     printf("\t-V\tdebug ouput\n");
+    abort();
 }
 
 int main(int argc, char **argv) 
 {
-    if (argc < 2 || strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-        usage();
-        return 0;
-    }
-
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
         ERR("simdgrep can't start");
         return 0; 
     } 
-    flags.verbose = flags.fixed_string = flags.no_ignore = false;
+    flags.fixed_string = flags.no_ignore = false;
     flags.color = isatty(STDOUT_FILENO);
     flags.ignore_case = true;
     flags.line_size = 65536;
@@ -265,33 +259,35 @@ int main(int argc, char **argv)
     memset(&g, 0, sizeof(g));
     g.callback = grep_callback;
 
-    const char *expr = argv[1];
-    int arg_files = 2;
-    for (int i = 1; i < argc - 1 && argv[i][0] == '-'; i++) {
-        expr = argv[i + 1];
-        arg_files = i + 2;
-        for (char *a = argv[i] + 1; *a; ) {
-            switch (*a++) {
-            case 'F': flags.fixed_string = true; break;
-            case 'V': flags.verbose = true; break;
-            case 'Z': flags.ignore_case = false; break;
-            case 'P': flags.color = false; break; 
-            case 'q': flags.quiet++; break;
-            case 'G': flags.no_ignore = true; break;
-            case 'a': g.binary_mode = BINARY_TEXT; break;
-            case 'I': g.binary_mode = BINARY_IGNORE; break;
-            case 'M': flags.line_size = MAX(1, strtol(a, &a, 10)) * 1024; break;
-            case 'A': flags.after_lines = g.after_lines = MAX(0, strtol(a, &a, 10)); break;
-            case 'x': flags.xbytes = MAX(0, strtol(a, &a, 10)); break;
-            case 'j': flags.num_threads = MAX(1, strtol(a, &a, 10)); break;
-            }
+    int cop;
+    opterr = 0;
+    while ((cop = getopt(argc, argv, "hFVZPqGaIM:A:B:C:x:j:")) != -1) {
+        switch (cop) {
+        case 'F': flags.fixed_string = true; break;
+        case 'V': flags.quiet = -1; break;
+        case 'Z': flags.ignore_case = false; break;
+        case 'P': flags.color = false; break; 
+        case 'q': flags.quiet++; break;
+        case 'G': flags.no_ignore = true; break;
+        case 'a': g.binary_mode = BINARY_TEXT; break;
+        case 'I': g.binary_mode = BINARY_IGNORE; break;
+        case 'M': flags.line_size = MAX(1, atoi(optarg)) * 1024; break;
+        case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
+        case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
+        case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
+        case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
+        case 'j': flags.num_threads = MAX(1, atoi(optarg)); break;
+        default: usage();
         }
     }
+    if (optind >= argc)
+        usage();
 
+    const char *expr = argv[optind];
     if (strlen(expr) == 0)
         return 0;
     
-    LOG("* search pattern: '%s', arg files: %d\n", expr, argc - arg_files);
+    LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
     LOG("* line size: %dK\n", flags.line_size / 1024);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
@@ -321,7 +317,7 @@ int main(int argc, char **argv)
         }
     }
 
-    for (; arg_files < argc; arg_files++) {
+    for (int arg_files = optind + 1; arg_files < argc; arg_files++) {
         const char *name = argv[arg_files];
         if (strlen(name) == 0)
             continue;
@@ -355,17 +351,15 @@ int main(int argc, char **argv)
     int num_walks = stack_free(&tasks);
     int num_files = stack_free(&files);
     LOG("* walked %d entries, searched %d files\n", num_walks, num_files);
-    //
 
-    for (struct stacknode *n = matchers.root; n; n = n->next) 
-        matcher_free((struct matcher *)n->value);
+    FOREACH(&matchers, n) matcher_free((struct matcher *)n->value);
     int num_ignores = stack_free(&matchers);
     if (flags.no_ignore) {
         LOG("* all files are searched, no ignores\n");
     } else {
         LOG("* respected %d .gitignore, %lld files ignored\n", num_ignores, flags.ignores);
     }
-    ERR("%lld falses", g.falses);
+    LOG("%lld falses\n", g.falses);
 
 EXIT:
     grepper_free(&g);

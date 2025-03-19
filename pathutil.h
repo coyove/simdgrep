@@ -9,10 +9,9 @@
 #include "stack.h"
 #include "wildmatch.h"
 
-#define PATH_SEP '/'
-
 struct matcher {
     char *root;
+    const char *file;
     struct stack includes;
     struct stack excludes;
     struct stack negate_excludes;
@@ -30,7 +29,7 @@ void matcher_free(struct matcher *m);
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl);
 
-struct matcher *matcher_load_ignore_file(char *dir);
+struct matcher *matcher_load_ignore_file(char *dir, struct matcher *parent, struct stack *matchers);
 
 bool is_repo_bin(const char *dir, const char *name);
 

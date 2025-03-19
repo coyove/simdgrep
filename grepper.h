@@ -56,7 +56,7 @@ struct grepline {
     struct grepper_ctx *ctx;
     struct grepper *g;
     int64_t nr;
-    bool is_afterline;
+    bool is_ctxline;
     const char *line;
     int len;
     int match_start;
@@ -70,6 +70,7 @@ struct grepper {
     bool ignore_case;
     int binary_mode;
     int len;
+    int before_lines;
     int after_lines;
     uint64_t _Atomic falses;
     bool (*callback)(const struct grepline *);
@@ -110,7 +111,7 @@ struct linebuf {
     int datalen;
     int buflen;
     bool overflowed;
-    bool ignore_counting_lines;
+    bool binary_matching;
     bool is_binary;
     char *buffer;
 };
@@ -136,13 +137,14 @@ static void buffer_reset(struct linebuf *l, int fd)
 {
     l->read = 0;
     l->fd = fd;
-    l->overflowed = l->ignore_counting_lines = false;
+    l->overflowed = l->binary_matching = false;
     l->lines = l->len = l->datalen = 0;
 }
 
 static void buffer_fill(struct linebuf *l, const char *path)
 {
-    if (!l->ignore_counting_lines) 
+    // Binary matching only prints 'binary file matched', no need to count lines.
+    if (!l->binary_matching)
         l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
 
     // Move tailing bytes forward.

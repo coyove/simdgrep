@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
+#define FOREACH(s, n) for (struct stacknode *n = (s)->root; n; n = n->next) 
+
 struct stacknode {
     void *value;
     _Atomic int32_t removed;
