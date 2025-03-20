@@ -15,8 +15,9 @@
 #undef ispunct
 #undef isxdigit
 
-static const unsigned char sane_ctype[256];
-static const signed char hexval_table[256];
+extern const unsigned char sane_ctype[256];
+extern const signed char hexval_table[256];
+
 #define GIT_SPACE 0x01
 #define GIT_DIGIT 0x02
 #define GIT_ALPHA 0x04

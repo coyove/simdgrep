@@ -30,22 +30,26 @@ const char *rel_path(const char *a, const char *b)
 char *join_path(const char *root, const char *b)
 {
     char res[PATH_MAX];
-#ifdef __MINGW32__
     /*
      * Windows style path "X:\abc", convert it to mingw (non-standard) style "/X/abc".
      * 'root' is always forward slash separated. (given .gitignores are all correctly written)
      * 
      */
     if (strlen(b) >= 3 && isalpha(b[0]) && b[1] == ':' && b[2] == '\\') {
+#ifdef __CYGWIN__ 
+        memcpy(res, "/cygdrive/", 10);
+        res[10] = tolower(b[0]);
+        memcpy(res + 11, b + 2, strlen(b) - 2 + 1);
+#endif
+#ifdef __MINGW32__ 
         res[0] = res[2] = '/';
         res[1] = tolower(b[0]);
         memcpy(res + 3, b + 3, strlen(b) + 1 - 3);
+#endif
         for (char *c = res; *c; c++) {
             *c = *c == '\\' ? '/' : *c;
         }
-    } else 
-#endif
-    if (strlen(b) > 0 && b[0] == '/') {
+    } else if (strlen(b) > 0 && b[0] == '/') {
         memcpy(res, b, strlen(b) + 1);
     } else {
         int ln = strlen(root);
