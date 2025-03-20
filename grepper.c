@@ -1,7 +1,26 @@
 #include "grepper.h"
+#include "STC/include/stc/csview.h"
+
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
+
+static bool maybe_valid_utf8(const char *start, const char *end) 
+{
+    static uint8_t tab[256] = 
+        "1111111111111111111111111111111111111111111111111111111111111111" 
+        "1111111111111111111111111111111111111111111111111111111111111111" 
+        "0000000000000000000000000000000000000000000000000000000000000000" 
+        "2222222222222222222222222222222233333333333333334444444400000000" 
+    ;
+    while (start < end) {
+        int v = tab[(uint8_t)*start] - '0';
+        if (!v)
+            return false; 
+        start += v;
+    }
+    return start == end;
+}
 
 #ifdef __cplusplus
 
@@ -420,7 +439,7 @@ void grepper_free(struct grepper *g)
     if (g->next_g)
         grepper_free(g->next_g);
     if (g->rx.use_regex)
-        regfree(&g->rx.engine);
+        cregex_drop(&g->rx.engine);
     if (g->rx.error)
         free(g->rx.error);
 }
@@ -518,6 +537,7 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
     // printf("%s\n", zzzres);
     // exit(1);
     const char *beforelines[g->before_lines][2];
+    csview rx_match[g->rx.groups];
 
     int fd = open(ctx->file_name, O_RDONLY);
     if (fd < 0)
@@ -537,7 +557,6 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
         }
     }
 
-    regmatch_t pmatch[1];
     int remain_after_lines = 0;
 
     while (lb->len) {
@@ -595,21 +614,21 @@ NG:
             }
 
             if (g->rx.use_regex) {
-                char end = *(char *)line_end;
-                *(char *)line_end = 0;
-                int rc = regexec(&g->rx.engine, g->rx.fixed_start ? s : line_start, 1, pmatch, 0);
-                *(char *)line_end = end;
-                if (rc != 0) {
+                const char *rx_start = g->rx.fixed_start ? s : line_start;
+                // if (!maybe_valid_utf8(rx_start, line_end)) {
+                //     lb->is_binary = true;
+                //     continue;
+                // }
+                char end = *line_end;
+                // *(char *)line_end = 0;
+                int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
+                // *(char *)line_end = end;
+                if (rc != CREG_OK) {
                     s = line_end + 1;
                     continue;
                 }
-                if (g->rx.fixed_start) {
-                    gl.match_end = gl.match_start + pmatch[0].rm_eo;
-                    gl.match_start += pmatch[0].rm_so;
-                } else {
-                    gl.match_start = pmatch[0].rm_so;
-                    gl.match_end = pmatch[0].rm_eo;
-                }
+                gl.match_start = rx_match[0].buf - line_start;
+                gl.match_end = gl.match_start + rx_match[0].size;
             }
 
             if (g->before_lines) {

@@ -1,7 +1,6 @@
 #ifndef _GREPPER_H
 #define _GREPPER_H
- 
-#include <regex.h>
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +14,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <regex.h>
+
+#include "STC/include/stc/cregex.h"
 
 #if defined(__x86_64__)
 
@@ -45,9 +45,10 @@ static const int MAX_BRUTE_FORCE_LENGTH = 0;
 struct grepper_ctx;
 
 struct rx_pattern_info {
-    regex_t engine;
+    cregex engine;
     bool use_regex;
     bool fixed_start;
+    int groups;
     char *error;
     const char *unsupported_escape;
 };
@@ -157,15 +158,16 @@ static void buffer_fill(struct linebuf *l, const char *path)
         return;
     }
 
-    l->read += n;
     l->len += n;
     l->datalen += n;
 
     const char *end = indexlastbyte(l->buffer, l->buffer + l->datalen, '\n');
     if (end) {
         l->len = end - l->buffer + 1;
+        l->read += l->len;
     } else if (l->datalen == l->buflen) {
         l->overflowed = true;
+        l->read += n;
     }
 }
 

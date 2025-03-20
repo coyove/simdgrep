@@ -2,6 +2,7 @@
 #include "grepper.h"
 #include "wildmatch.h"
 #include "pathutil.h"
+#include "STC/include/stc/priv/utf8_prv.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -239,6 +240,15 @@ void usage()
 
 int main(int argc, char **argv) 
 {
+    // char zzz[100] = {137,82,176,12,216,99,190,52,239,115,92,199,0};
+    // utf8_decode_t ctx = {.state=0};
+    // const uint8_t *b = (const uint8_t*)zzz;
+    // while (*b) {
+    // do { printf("%c\n", *b); utf8_decode(&ctx, *b++); } while (ctx.state && ctx.state != 12);
+    // printf("=%d\n", ctx.codep);
+    // }
+ 
+    // return 0;
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
         ERR("simdgrep can't start");
         return 0; 

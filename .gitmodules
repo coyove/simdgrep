@@ -1,0 +1,3 @@
+[submodule "STC"]
+	path = STC
+	url = https://github.com/stclib/STC

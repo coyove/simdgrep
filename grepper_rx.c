@@ -1,5 +1,8 @@
 #include "grepper.h"
 
+#define i_import
+#include "STC/include/stc/cregex.h"
+
 static int _rx_skip_bracket(const char *s, int i)
 {
     int depth = 1;
@@ -122,11 +125,13 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
 
 INIT:
     if (g->rx.use_regex) {
-        int rc = regcomp(&g->rx.engine, s, REG_EXTENDED | (ignore_case ? REG_ICASE : 0));
-        if (rc) {
+        g->rx.engine = cregex_make(s, ignore_case ? CREG_ICASE : 0);
+        if (g->rx.engine.error != CREG_OK) {
             g->rx.use_regex = false;
-            g->rx.error = (char *)malloc(1024);
-            regerror(rc, &g->rx.engine, g->rx.error, 1024);
+            g->rx.error = (char *)malloc(256);
+            snprintf(g->rx.error, 256, "invalid regexp (%d)", g->rx.engine.error);
+        } else {
+            g->rx.groups = cregex_captures(&g->rx.engine) + 1;
         }
     }
 
