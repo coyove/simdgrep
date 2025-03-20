@@ -44,6 +44,7 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
 {
     int i = 0, j = 0, sl = strlen(s);
     char *pp = (char *)malloc(sl + 1);
+    memset(pp, 0, sl + 1);
 
     for (; i < sl; i++) {
         switch (s[i]) {
