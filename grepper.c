@@ -5,23 +5,6 @@
 #include <stdatomic.h>
 #include <string.h>
 
-static bool maybe_valid_utf8(const char *start, const char *end) 
-{
-    static uint8_t tab[256] = 
-        "1111111111111111111111111111111111111111111111111111111111111111" 
-        "1111111111111111111111111111111111111111111111111111111111111111" 
-        "0000000000000000000000000000000000000000000000000000000000000000" 
-        "2222222222222222222222222222222233333333333333334444444400000000" 
-    ;
-    while (start < end) {
-        int v = tab[(uint8_t)*start] - '0';
-        if (!v)
-            return false; 
-        start += v;
-    }
-    return start == end;
-}
-
 #ifdef __cplusplus
 
 #include <string>
@@ -613,22 +596,9 @@ NG:
                 goto NG;
             }
 
-            if (g->rx.use_regex) {
-                const char *rx_start = g->rx.fixed_start ? s : line_start;
-                // if (!maybe_valid_utf8(rx_start, line_end)) {
-                //     lb->is_binary = true;
-                //     continue;
-                // }
-                char end = *line_end;
-                // *(char *)line_end = 0;
-                int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
-                // *(char *)line_end = end;
-                if (rc != CREG_OK) {
-                    s = line_end + 1;
-                    continue;
-                }
-                gl.match_start = rx_match[0].buf - line_start;
-                gl.match_end = gl.match_start + rx_match[0].size;
+            if (!grepper_match(g, &gl, rx_match, line_start, s, line_end)) {
+                s = line_end + 1;
+                continue;
             }
 
             if (g->before_lines) {

@@ -28,6 +28,7 @@ static struct _flags {
     int line_size;
     int quiet;
     int xbytes;
+    int verbose;
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
@@ -155,14 +156,42 @@ CLEANUP_TASK:
     goto NEXT;
 }
 
+void print_ssns(const char *a, const char *b, int len, const char *c)
+{
+    if (a && *a)
+        fwrite(a, 1, strlen(a), stdout);
+
+    fwrite(b, 1, len, stdout);
+
+    if (c && *c)
+        fwrite(c, 1, strlen(c), stdout);
+}
+
+void print_sss(const char *a, const char *b, const char *c)
+{
+    print_ssns(a, b, strlen(b), c);
+}
+
+void print_sis(const char *a, uint64_t b, const char *c)
+{
+    char buf[32];
+    char *s = buf + 32;
+    do {
+        *(--s) = b % 10 + '0';
+        b /= 10;
+    } while(b);
+    print_ssns(a, s, buf + 32 - s, c);
+}
+
 bool grep_callback(const struct grepline *l)
 {
-    // return true;
     struct payload *p = (struct payload *)l->ctx->memo;
     const char *name = rel_path(flags.cwd, l->ctx->file_name);
     LOCK();
     if (l->ctx->lbuf.is_binary && g.binary_mode == BINARY) {
-        printf("%s: binary file matches\n", name);
+        if (flags.verbose) {
+            printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
+        }
     } else {
         int i = 0, j = l->len;
         if (l->len > flags.xbytes + g.len + 10) {
@@ -173,43 +202,40 @@ bool grep_callback(const struct grepline *l)
         }
 
         if (l->is_ctxline || !flags.color) {
-            printf("%s:"
-                    "%lld:"
-                    "%s"
-                    "%.*s"
-                    "%s\n",
-                    name, l->nr + 1,
-                    i == 0 ? "" : "...",
-                    j - i, l->line + i,
-                    j == l->len ? "" : "...");
+            if (flags.verbose & 4)
+                print_sss(0, name, flags.verbose > 4 ? ":" : "");
+            if (flags.verbose & 2)
+                print_sis(0, l->nr + 1, (flags.verbose & 1) ? ":" : "");
+            if (flags.verbose & 1) {
+                print_sss(0, i == 0 ? "" : "...", 0);
+                print_ssns(0, l->line + i, j - i, 0);
+                print_sss(0, j == l->len ? "" : "...", "");
+            }
+            if (flags.verbose)
+                print_sss(0, "\n", 0);
         } else {
-            printf("\033[0;35m%s\033[0m:"    // filename
-                    "\033[1;32m%lld\033[0m:" // line number
-                    "\033[1;33m%s\033[0m"    // left ellipsis
-                    "%.*s"                   // before context
-                    "\033[1;31m%.*s\033[0m"  // hightlight match
-                    "%.*s"                   // after context
-                    "\033[1;33m%s\033[0m\n", // right ellipsis
-                    name, l->nr + 1,
-                    i == 0 ? "" : "...",
-                    l->match_start - i, l->line + i,
-                    l->match_end - l->match_start, l->line + l->match_start,
-                    j - l->match_end, l->line + l->match_end,
-                    j == l->len ? "" : "...");
+            if (flags.verbose & 4)
+                print_sss("\033[0;35m", name, flags.verbose > 4 ? "\033[0m:" : "\033[0m"); 
+            if (flags.verbose & 2)
+                print_sis("\033[1;32m", l->nr + 1, (flags.verbose & 1) ? "\033[0m:" : "\033[0m"); 
+            if (flags.verbose & 1) {
+                // left ellipsis
+                print_sss("\033[1;33m", i == 0 ? "" : "...", "\033[0m"); 
+                // before context
+                print_ssns(0, l->line + i, l->match_start - i, 0); 
+                // hightlight match
+                print_ssns("\033[1;31m", l->line + l->match_start, l->match_end - l->match_start, "\033[0m"); 
+                // after context
+                print_ssns(0, l->line + l->match_end, j - l->match_end, 0); 
+                // right ellipsis
+                print_sss("\033[1;33m", j == l->len ? "" : "...", "\033[0m"); 
+            }
+            if (flags.verbose)
+                print_sss(0, "\n", 0);
         }
     }
     UNLOCK();
-    return true;
-}
-
-char *join_cwd_or_die(const char *b)
-{
-    char *resolved = join_path(flags.cwd, b);
-    if (!resolved) {
-        ERR("can't resolve path %s", b);
-        exit(0);
-    }
-    return resolved;
+    return flags.verbose != 4; // 4: filename only
 }
 
 void usage()
@@ -225,15 +251,17 @@ void usage()
     printf("\t-G\tsearch all files regardless of .gitignore\n");
     printf("\t-q\tsuppress warning messages\n");
     printf("\t-qq\tsuppress error messages\n");
+    printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: line content)\n");
+    printf("\t       \te.g.: -v5 means print filename and line content\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
-    printf("\t-x NUM\ttruncate lines longer than NUM bytes to make output compact\n");
-    printf("\t-A NUM\tprint NUM lines of trailing context\n");
-    printf("\t-B NUM\tprint NUM lines of leading context\n");
-    printf("\t-C NUM\tcombine -A<NUM> and -B<NUM>\n");
-    printf("\t-M NUM\tdefine max line length in NUM kilobytes, any lines longer will be split,\n");
+    printf("\t-x N\ttruncate lines longer than N bytes to make output compact\n");
+    printf("\t-A N\tprint N lines of trailing context\n");
+    printf("\t-B N\tprint N lines of leading context\n");
+    printf("\t-C N\tcombine -A N and -B N\n");
+    printf("\t-M N\tdefine max line length in N kilobytes, any lines longer will be split,\n");
     printf("\t       \tthus matches may be incomplete at split points (default: 64K)\n");
-    printf("\t-J NUM\tNUM of threads for searching\n");
+    printf("\t-J N\tN of threads for searching\n");
     printf("\t-V\tdebug ouput\n");
     abort();
 }
@@ -259,6 +287,7 @@ int main(int argc, char **argv)
     flags.line_size = 65536;
     flags.quiet = 0;
     flags.xbytes = 1e8;
+    flags.verbose = 7;
     memset(&flags.default_matcher, 0, sizeof(struct matcher));
     flags.default_matcher.top = &flags.default_matcher;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
@@ -269,9 +298,12 @@ int main(int argc, char **argv)
     memset(&g, 0, sizeof(g));
     g.callback = grep_callback;
 
+    char *outbuf = malloc(128 * 1024); 
+    setvbuf(stdout, outbuf, _IOFBF, 128 * 1024); 
+
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "hFVZPqGaIM:A:B:C:x:j:")) != -1) {
+    while ((cop = getopt(argc, argv, "hFVZPqGaIM:A:B:C:x:j:v:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'V': flags.quiet = -1; break;
@@ -287,25 +319,27 @@ int main(int argc, char **argv)
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
         case 'j': flags.num_threads = MAX(1, atoi(optarg)); break;
+        case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
         default: usage();
         }
     }
     if (optind >= argc)
         usage();
 
+    struct payload payloads[flags.num_threads];
+    uint32_t _Atomic sigs[flags.num_threads];
+
     const char *expr = argv[optind];
     if (strlen(expr) == 0)
-        return 0;
+        goto EXIT;
     
     LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
     LOG("* line size: %dK\n", flags.line_size / 1024);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
-    LOG("* print after %d lines\n", g.after_lines);
+    LOG("* verbose mode: %d\n", flags.verbose);
+    LOG("* print -%d+%d lines\n", g.before_lines, g.after_lines);
     LOG("* line context bytes +-%d\n", flags.xbytes);
-
-    struct payload payloads[flags.num_threads];
-    uint32_t _Atomic sigs[flags.num_threads];
 
     if (flags.fixed_string) {
         grepper_init(&g, expr, flags.ignore_case);
@@ -338,12 +372,17 @@ int main(int argc, char **argv)
             matcher_add_rule(&flags.default_matcher, name + 1, name + strlen(name), false);
             LOG("* add exclude pattern %s\n", name + 1);
         } else {
+            char *resolved = join_path(flags.cwd, name);
+            if (!resolved) {
+                ERR("can't resolve path %s", name);
+                abort();
+            }
             LOG("* search %s\n", name);
-            stack_push(&tasks, new_task(join_cwd_or_die(name), &flags.default_matcher));
+            stack_push(&tasks, new_task(resolved, &flags.default_matcher));
         }
     }
     if (tasks.count == 0) {
-        stack_push(&tasks, new_task(join_cwd_or_die("."), &flags.default_matcher));
+        stack_push(&tasks, new_task(strdup(flags.cwd), &flags.default_matcher));
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
@@ -372,6 +411,7 @@ int main(int argc, char **argv)
     LOG("%lld falses\n", g.falses);
 
 EXIT:
+    free(outbuf);
     grepper_free(&g);
     matcher_free(&flags.default_matcher);
     pthread_mutex_destroy(&flags.lock); 

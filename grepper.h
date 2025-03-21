@@ -46,8 +46,10 @@ struct grepper_ctx;
 
 struct rx_pattern_info {
     cregex engine;
-    bool use_regex;
     bool fixed_start;
+    bool line_start;
+    bool line_end;
+    int use_regex;
     int groups;
     char *error;
     const char *unsupported_escape;
@@ -92,6 +94,8 @@ void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
+bool grepper_match(struct grepper *, struct grepline *, csview *, const char *, const char *, const char *);
+
 int grepper_file(struct grepper *, struct grepper_ctx *);
 
 int64_t countbyte(const char *s, const char *end, uint8_t c);
@@ -126,6 +130,7 @@ struct grepper_ctx {
 
 static void buffer_init(struct linebuf *l, int line_size)
 {
+    memset(l, 0, sizeof(struct linebuf));
     l->buflen = line_size;
     /* 
        Regex will use this buffer to do matching and temporarily place NULL at
@@ -144,7 +149,6 @@ static void buffer_reset(struct linebuf *l, int fd)
 
 static void buffer_fill(struct linebuf *l, const char *path)
 {
-    // Binary matching only prints 'binary file matched', no need to count lines.
     if (!l->binary_matching)
         l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
 
