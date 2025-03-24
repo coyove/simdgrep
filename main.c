@@ -345,10 +345,6 @@ int main(int argc, char **argv)
         grepper_init(&g, expr, flags.ignore_case);
     } else {
         grepper_init_rx(&g, expr, flags.ignore_case);
-        if (g.rx.unsupported_escape) {
-            ERR("pattern with unsupported escape at '%s'", g.rx.unsupported_escape);
-            goto EXIT;
-        }
         if (g.rx.error) {
             ERR("invalid expression: %s", g.rx.error);
             goto EXIT;

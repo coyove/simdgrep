@@ -4,6 +4,7 @@
 
 #define i_import
 #include "STC/include/stc/cregex.h"
+#include "STC/include/stc/utf8.h"
 
 #define RX_SOL 0x80000000
 #define RX_EOL 0x40000000
@@ -54,7 +55,13 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
     char *pp = (char *)malloc(sl + 1);
     memset(pp, 0, sl + 1);
 
-    for (; i < sl; i++) {
+    for (bool lit = false; i < sl; i++) {
+        if (lit) {
+            if (s[i] != '\\' || i + 1 >= sl || s[i + 1] != 'E') {
+                pp[j++] = s[i];
+                continue;
+            }
+        }
         switch (s[i]) {
         case '|':
             g->rx.use_regex++;
@@ -64,19 +71,25 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
             if (++i >= sl)
                 goto UNSUPPORTED;
             switch (s[i]) {
+            case 'Q': lit = true; break;
+            case 'E': lit = false; break;
             case 'x':
-                if (i + 2 >= sl || !isxdigit(*(s + i + 1)) || !isxdigit(*(s + i + 2)))
+                if (i + 3 >= sl || s[i + 1] != '{')
                     goto UNSUPPORTED;
-                char tmp[3] = {*(s + i + 1), *(s + i + 2), 0};
-                pp[j++] = strtol(tmp, NULL, 16);
+                char *rend;
                 i += 2;
+                int r = strtol(s + i, &rend, 16);
+                if (*rend != '}' || r < 0 || r > 0x10FFFF)
+                    goto UNSUPPORTED;
+                j += utf8_encode(pp + j, r);
+                i = rend - s;
                 break;
-            case 'r':
-                pp[j++] = '\r'; break;
-            case 't':
-                pp[j++] = '\t'; break;
-            case 'b': case 'B': case 'w': case 'W': case '<': case '>':
-            case '`': case '\'':
+            case 'r': pp[j++] = '\r'; break;
+            case 't': pp[j++] = '\t'; break;
+            case 'v': pp[j++] = '\v'; break;
+            case 'f': pp[j++] = '\f'; break;
+            case 'a': pp[j++] = '\a'; break;
+            case 's': case 'S': case 'w': case 'W': case 'd': case 'D':
                 g->rx.use_regex++;
                 pp[j++] = 0;
                 break;
@@ -152,7 +165,7 @@ INIT:
         if (g->rx.engine.error != CREG_OK) {
             g->rx.use_regex = 0;
             g->rx.error = (char *)malloc(256);
-            snprintf(g->rx.error, 256, "invalid regexp (%d)", g->rx.engine.error);
+            snprintf(g->rx.error, 256, "regexp error (%d)", g->rx.engine.error);
         } else {
             g->rx.groups = cregex_captures(&g->rx.engine) + 1;
         }
@@ -177,7 +190,8 @@ INIT:
 
 UNSUPPORTED:
     free(pp);
-    g->rx.unsupported_escape = s + i - 1;
+    g->rx.error = (char *)malloc(256);
+    snprintf(g->rx.error, 256, "invalid escape at '%s'", s + i - 1);
 }
 
 bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,

@@ -52,7 +52,6 @@ struct rx_pattern_info {
     int use_regex;
     int groups;
     char *error;
-    const char *unsupported_escape;
 };
 
 struct grepline {
