@@ -150,8 +150,11 @@ static void buffer_reset(struct linebuf *l, int fd)
     l->lines = l->len = l->datalen = 0;
 }
 
-static void buffer_fill(struct linebuf *l, const char *path)
+static void buffer_fill(struct linebuf *l)
 {
+    if (l->fd == 0)
+        return;
+
     if (!l->binary_matching)
         l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
 

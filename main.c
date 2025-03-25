@@ -2,7 +2,6 @@
 #include "grepper.h"
 #include "wildmatch.h"
 #include "pathutil.h"
-#include "STC/include/stc/priv/utf8_prv.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,16 +42,24 @@ struct payload {
 
 struct task {
     char *name;
-    struct stat stat;
+    bool is_dir;
     struct matcher *m;
 };
 
-struct task *new_task(char *name, struct matcher *m)
+struct task *new_task(char *name, struct matcher *m, bool is_dir)
 {
     struct task *t = (struct task *)malloc(sizeof(struct task));
     t->name = name;
     t->m = m;
+    t->is_dir = is_dir;
     return t;
+}
+
+static bool is_dir(const char *name)
+{
+    struct stat ss;
+    lstat(name, &ss); 
+    return S_ISDIR(ss.st_mode);
 }
 
 struct stack tasks;
@@ -64,8 +71,6 @@ void *push(void *arg)
 {
     struct payload *p = (struct payload *)arg;
     struct task *t;
-    struct stat ss;
-    const char *rule, *source;
     char reason[1024];
 
 NEXT:
@@ -84,7 +89,6 @@ NEXT:
         atomic_store(&p->sigs[p->i], 1);
 
         p->ctx.file_name = t->name;
-        p->ctx.file_size = t->stat.st_size;
         int res = grepper_file(&g, &p->ctx);
         if (res != 0) {
             ERR("read %s", t->name);
@@ -96,12 +100,7 @@ NEXT:
     }
     atomic_store(&p->sigs[p->i], 1);
 
-    if (lstat(t->name, &ss) != 0) {
-        ERR("stat %s", t->name);
-        goto CLEANUP_TASK;
-    }
-
-    if (S_ISDIR(ss.st_mode)) {
+    if (t->is_dir) {
         size_t ln = strlen(t->name);
         ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
         if (!matcher_match(t->m, t->name, true, reason, sizeof(reason))) {
@@ -137,11 +136,13 @@ NEXT:
                 memcpy(buf + ln, "/", 1);
                 memcpy(buf + ln + 1, dname, strlen(dname) + 1);
             }
-            stack_push(&tasks, new_task(buf, root));
+            bool id = dirent->d_type == DT_DIR;
+            if (dirent->d_type == DT_UNKNOWN)
+                id = is_dir(buf);
+            stack_push(&tasks, new_task(buf, root, id));
         }
         closedir(dir);
-    } else if (S_ISREG(ss.st_mode) && ss.st_size > 0) {
-        t->stat = ss;
+    } else {
         if (matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
             stack_push(&files, t);
             goto NEXT;
@@ -367,12 +368,12 @@ int main(int argc, char **argv)
                 ERR("can't resolve path %s", name);
                 abort();
             }
-            LOG("* search %s\n", name);
-            stack_push(&tasks, new_task(resolved, &flags.default_matcher));
+            LOG("* search %s\n", resolved);
+            stack_push(&tasks, new_task(resolved, &flags.default_matcher, is_dir(resolved)));
         }
     }
     if (tasks.count == 0) {
-        stack_push(&tasks, new_task(strdup(flags.cwd), &flags.default_matcher));
+        stack_push(&tasks, new_task(strdup(flags.cwd), &flags.default_matcher, true));
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {

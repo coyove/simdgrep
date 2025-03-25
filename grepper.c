@@ -547,7 +547,7 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
     int fd = 0;
     if (g->search_name) {
         buffer_reset(lb, 0);
-        ctx->file_size = lb->read = lb->len = lb->datalen = strlen(ctx->file_name) + 1;
+        lb->read = lb->len = lb->datalen = strlen(ctx->file_name) + 1;
         memcpy(lb->buffer, ctx->file_name, lb->len);
     } else {
         fd = open(ctx->file_name, O_RDONLY);
@@ -555,7 +555,7 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
             return -1;
 
         buffer_reset(lb, fd);
-        buffer_fill(lb, ctx->file_name);
+        buffer_fill(lb);
     }
 
     lb->is_binary = indexbyte(lb->buffer, lb->buffer + MIN(lb->len, 1024), 0);
@@ -671,9 +671,9 @@ NG:
 
             s = line_end + 1;
         }
-        if (lb->read >= ctx->file_size)
-            break;
-        buffer_fill(lb, ctx->file_name);
+        // if (lb->read >= ctx->file_size)
+        //     break;
+        buffer_fill(lb);
     }
  
 CLEANUP:
