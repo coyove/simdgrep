@@ -1,4 +1,5 @@
 #include "grepper.h"
+
 #include "STC/include/stc/csview.h"
 
 #include <stdlib.h>
@@ -276,7 +277,7 @@ const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t ma
     }
 
     while (s < end - 3) {
-        if ((*(uint32_t *)s & mask4) == v4)
+        if ((*(uint32_t *)s & mask4) == (v4 & mask4))
             return s;
         s++;
     }
@@ -385,16 +386,26 @@ void grepper_init(struct grepper *g, const char *find, bool ignore_case)
     g->findlower = g->findupper + g->len + 1;
     memset(g->find, 0, g->len * 3 + 3);
     memset(g->_table, -1, 256 * sizeof(int));
-    for (int i = 0; i < g->len; i++){
-        if (ignore_case) {
-            g->findupper[i] = toupper(find[i]);
-            g->findlower[i] = tolower(find[i]);
-        } else {
-            g->findupper[i] = g->findlower[i] = find[i];
+
+    if (ignore_case) {
+        for (int i = 0, j = 0; i < g->len; ){
+            uint32_t r;
+            int n = torune(&r, find + i);
+            utf8_encode(g->findlower + j, utf8_tolower(r));
+            utf8_encode(g->findupper + j, utf8_toupper(r));
+            for (; n; n--, i++, j++) {
+                g->find[i] = find[i];
+                g->_table[(uint8_t)g->findlower[j]] = i;
+                g->_table[(uint8_t)g->findupper[j]] = i;
+            }
         }
-        g->find[i] = find[i];
-        g->_table[(uint8_t)g->findlower[i]] = g->_table[(uint8_t)g->findupper[i]] = i;
+    } else {
+        for (int i = 0; i < g->len; i++){
+            g->find[i] = g->findupper[i] = g->findlower[i] = find[i];
+            g->_table[(uint8_t)find[i]] = i;
+        }
     }
+
     g->falses = 0;
     g->next_g = 0;
     g->_case_mask8 = ignore_case ? 0xDF : 0xFF;
@@ -478,17 +489,27 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
     }
 
     if (g->len == 1) {
-        if (g->find[0] == '\n')
-            return s;
         return g->ignore_case ?
             indexcasebyte(s, end, tolower(*g->find), toupper(*g->find)) :
             indexbyte(s, end, *g->find);
     }
 
-    if (1&&g->len >= 4)
+    if (g->len >= 4)
         return indexcasestr_long4(g, s, end);
 
     return indexcasestr_long(g, s, end);
+}
+
+
+static const char *indexcasestr_rx(struct grepper *g, const char *s, const char *end, csview *rx_match)
+{
+    char ch = *end;
+    *(char *)end = 0;
+    int rc = cregex_match_sv(&g->rx.engine, csview_from_n(s, end - s), rx_match);
+    *(char *)end = ch;
+    if (rc != CREG_OK)
+        return NULL;
+    return rx_match[0].buf;
 }
 
 static const char *_indexlf(const char *s, const char *end)
@@ -521,14 +542,21 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
     // exit(1);
     const char *beforelines[g->before_lines][2];
     csview rx_match[g->rx.groups];
-
-    int fd = open(ctx->file_name, O_RDONLY);
-    if (fd < 0)
-        return -1;
-
     struct linebuf *lb = &ctx->lbuf;
-    buffer_reset(lb, fd);
-    buffer_fill(lb, ctx->file_name);
+
+    int fd = 0;
+    if (g->search_name) {
+        buffer_reset(lb, 0);
+        ctx->file_size = lb->read = lb->len = lb->datalen = strlen(ctx->file_name) + 1;
+        memcpy(lb->buffer, ctx->file_name, lb->len);
+    } else {
+        fd = open(ctx->file_name, O_RDONLY);
+        if (fd < 0)
+            return -1;
+
+        buffer_reset(lb, fd);
+        buffer_fill(lb, ctx->file_name);
+    }
 
     lb->is_binary = indexbyte(lb->buffer, lb->buffer + MIN(lb->len, 1024), 0);
     if (lb->is_binary) {
@@ -563,7 +591,7 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
         }
 
         while (s < end) {
-            s = indexcasestr(g, s, end);
+            s = g->slow_rx ? indexcasestr_rx(g, s, end, rx_match) : indexcasestr(g, s, end);
             if (!s)
                 break;
 
@@ -649,6 +677,7 @@ NG:
     }
  
 CLEANUP:
-    close(fd);
+    if (fd)
+        close(fd);
     return 0;
 }

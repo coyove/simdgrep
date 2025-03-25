@@ -242,25 +242,29 @@ void usage()
 {
     printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
     printf("PATTERN syntax is POSIX extended regex\n");
-    printf("FILE starting with '+' is an include pattern, e.g.: simdgrep PATTERN dir +*.c\n");
-    printf("FILE starting with '-' is an exclude pattern, e.g.: simdgrep PATTERN dir -**/testdata\n");
+    printf("FILE starting with '+' is an include pattern, e.g.:\n");
+    printf("\tsimdgrep PATTERN dir '+*.c'\n");
+    printf("FILE starting with '-' is an exclude pattern, e.g.:\n");
+    printf("\tsimdgrep PATTERN dir '-**/testdata'\n");
     printf("\n");
     printf("\t-F\tfixed string pattern\n");
     printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
     printf("\t-P\tprint results without coloring\n");
     printf("\t-G\tsearch all files regardless of .gitignore\n");
+    printf("\t-f\tsearch file name instead of file content\n");
     printf("\t-q\tsuppress warning messages\n");
     printf("\t-qq\tsuppress error messages\n");
-    printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: line content)\n");
-    printf("\t       \te.g.: -v5 means print filename and line content\n");
+    printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: content)\n");
+    printf("\t\te.g.: -v5 means print filename and matched content\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
     printf("\t-x N\ttruncate lines longer than N bytes to make output compact\n");
     printf("\t-A N\tprint N lines of trailing context\n");
     printf("\t-B N\tprint N lines of leading context\n");
     printf("\t-C N\tcombine -A N and -B N\n");
-    printf("\t-M N\tdefine max line length in N kilobytes, any lines longer will be split,\n");
-    printf("\t       \tthus matches may be incomplete at split points (default: 64K)\n");
+    printf("\t-M N\tdefine max line length in N kilobytes, any lines longer will be\n");
+    printf("\t\tsplit into parts, thus matches may be incomplete at split \n");
+    printf("\t\tpoints (default: 64K)\n");
     printf("\t-J N\tN of threads for searching\n");
     printf("\t-V\tdebug ouput\n");
     abort();
@@ -268,14 +272,6 @@ void usage()
 
 int main(int argc, char **argv) 
 {
-    // char zzz[100] = {137,82,176,12,216,99,190,52,239,115,92,199,0};
-    // utf8_decode_t ctx = {.state=0};
-    // const uint8_t *b = (const uint8_t*)zzz;
-    // while (*b) {
-    // do { printf("%c\n", *b); utf8_decode(&ctx, *b++); } while (ctx.state && ctx.state != 12);
-    // printf("=%d\n", ctx.codep);
-    // }
- 
     // return 0;
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
         ERR("simdgrep can't start");
@@ -298,14 +294,12 @@ int main(int argc, char **argv)
     memset(&g, 0, sizeof(g));
     g.callback = grep_callback;
 
-    char *outbuf = malloc(128 * 1024); 
-    setvbuf(stdout, outbuf, _IOFBF, 128 * 1024); 
-
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "hFVZPqGaIM:A:B:C:x:j:v:")) != -1) {
+    while ((cop = getopt(argc, argv, "hfFVZPqGaIM:A:B:C:x:j:v:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
+        case 'f': g.search_name = true; flags.verbose = 4; break;
         case 'V': flags.quiet = -1; break;
         case 'Z': flags.ignore_case = false; break;
         case 'P': flags.color = false; break; 
@@ -352,8 +346,8 @@ int main(int argc, char **argv)
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
             LOG("* fixed %s: %s\n", ng == &g && g.rx.fixed_start ? "prefix" : "pattern", ng->find);
         }
-        if (strcmp(g.find, "\n") == 0) {
-            WARN("warning: no fixed pattern in '%s', searching will be extremely slow\n", expr);
+        if (g.slow_rx) {
+            WARN("warning: no fixed pattern in '%s', regex searching will be extremely slow\n", expr);
         }
     }
 
@@ -407,7 +401,6 @@ int main(int argc, char **argv)
     LOG("%lld falses\n", g.falses);
 
 EXIT:
-    free(outbuf);
     grepper_free(&g);
     matcher_free(&flags.default_matcher);
     pthread_mutex_destroy(&flags.lock); 

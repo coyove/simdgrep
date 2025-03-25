@@ -70,6 +70,8 @@ struct grepper {
     char *findupper;
     char *findlower;
     bool ignore_case;
+    bool slow_rx;
+    bool search_name;
     int binary_mode;
     int len;
     int before_lines;
@@ -84,6 +86,8 @@ struct grepper {
     struct rx_pattern_info rx;
     struct grepper *next_g;
 };
+
+int torune(uint32_t *rune, const char *s);
 
 void grepper_init(struct grepper *g, const char *find, bool ignore_case);
 

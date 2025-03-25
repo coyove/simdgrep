@@ -9,6 +9,27 @@
 #define RX_SOL 0x80000000
 #define RX_EOL 0x40000000
 
+int torune(uint32_t *rune, const char *s)
+{
+    // for (int i=0; i < (int)(sizeof lowcase_ind/sizeof *lowcase_ind); ++i) {
+    //     const struct CaseMapping entry = casemappings[lowcase_ind[i]];
+    //     if (entry.m2 - entry.c2 != 32) {
+    //         for (int c = entry.c1; c <= entry.c2; c++) 
+    //             printf("\\u%04x", c);
+    //     }
+    // }
+    // abort();
+    return chartorune(rune, s);
+}
+
+static bool safecase(uint32_t r)
+{
+    char tmp[4];
+    int lo = utf8_tolower(r), hi = utf8_toupper(r);
+    int d = hi > lo ? hi - lo : lo - hi;
+    return (d == 0 || d == 32) && utf8_encode(tmp, lo) == utf8_encode(tmp, hi);
+}
+
 static int _rx_skip_bracket(const char *s, int i)
 {
     int depth = 1;
@@ -81,8 +102,13 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
                 int r = strtol(s + i, &rend, 16);
                 if (*rend != '}' || r < 0 || r > 0x10FFFF)
                     goto UNSUPPORTED;
-                j += utf8_encode(pp + j, r);
                 i = rend - s;
+                if (ignore_case && !safecase(r)) {
+                    g->rx.use_regex++;
+                    pp[j++] = 0;
+                } else {
+                    j += utf8_encode(pp + j, r);
+                }
                 break;
             case 'r': pp[j++] = '\r'; break;
             case 't': pp[j++] = '\t'; break;
@@ -90,21 +116,13 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
             case 'f': pp[j++] = '\f'; break;
             case 'a': pp[j++] = '\a'; break;
             case 's': case 'S': case 'w': case 'W': case 'd': case 'D':
+            case 'b': case 'B': case 'A': case 'z': case 'Z': case 'p': 
+            case 'P':
                 g->rx.use_regex++;
                 pp[j++] = 0;
                 break;
-            case '(': case ')': case '[': case ']': case '+': case '*':
-            case '?': case '|': case '.': case '^': case '$': case '\\':
-            case '{': case '}':
-                pp[j++] = s[i];
-                break;
             default:
-                g->rx.use_regex++;
-                char *end;
-                strtol(s + i, &end, 10);
-                if (end == s + i)
-                    goto UNSUPPORTED;
-                i = end - s;
+                pp[j++] = s[i];
             }
             break;
         case '.':
@@ -132,6 +150,8 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
         case '*': case '?': 
             g->rx.use_regex++;
             for (j--; j && ((uint8_t)pp[j] >> 6) == 2; j--);
+            if (j < 0)
+                goto UNSUPPORTED;
             if (j)
                 pp[j++] = 0;
             break;
@@ -141,9 +161,22 @@ void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
             i = _rx_skip_bracket(s, i) - 1; // ++i
             break;
         default:
+            if (ignore_case) {
+                uint32_t r;
+                int n = torune(&r, s + i);
+                memcpy(pp + j, s + i, n);
+                i += n - 1;
+                if (!safecase(r)) {
+                    g->rx.use_regex++;
+                    pp[j++] = 0;
+                    break;
+                }
+                j += n;
+            } else {
+                pp[j++] = s[i];
+            }
             if (!g->rx.use_regex)
                 g->rx.fixed_start = true;
-            pp[j++] = s[i];
         }
     }
 
@@ -182,8 +215,10 @@ INIT:
         }
         i += ln + 1;
     }
-    if (!g->find)
-        grepper_init(g, "\n", false);
+    if (!g->find) {
+        grepper_init(g, "<SLOWRX>", false);
+        g->slow_rx = true;
+    }
 
     free(pp);
     return;
@@ -201,7 +236,6 @@ bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
         const char *rx_start = g->rx.fixed_start ? s : line_start;
         char end = *line_end;
 
-        // Create valid C string.
         *(char *)line_end = 0;
         int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
         *(char *)line_end = end;
