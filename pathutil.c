@@ -1,6 +1,8 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include "pathutil.h"
 
@@ -8,6 +10,19 @@
 #define _IPATH 'G'
 #define _IDIR 'D'
 #define _ISIMPLE 0x80
+
+const char *is_glob_path(const char *p, const char *end)
+{
+    const char *slash = NULL;
+    for (const char *i = p; i < end; i++) {
+        if (*i == '/') {
+            slash = i;
+        } else if ((*i == '*' || *i == '?' || *i == '[' || *i == ']') && (i == p || *(i - 1) != '\\')) {
+            return slash ? slash + 1 : p;
+        }
+    }
+    return NULL;
+}
 
 const char *rel_path(const char *a, const char *b)
 {
@@ -27,35 +42,36 @@ const char *rel_path(const char *a, const char *b)
     return b + al + 1;
 }
 
-char *join_path(const char *root, const char *b)
+char *join_path(const char *root, const char *b, int len)
 {
     char res[PATH_MAX];
+    memset(res, 0, sizeof(res));
     /*
      * Windows style path "X:\abc", convert it to mingw (non-standard) style "/X/abc".
      * 'root' is always forward slash separated. (given .gitignores are all correctly written)
      * 
      */
-    if (strlen(b) >= 3 && isalpha(b[0]) && b[1] == ':' && b[2] == '\\') {
+    if (len >= 3 && isalpha(b[0]) && b[1] == ':' && b[2] == '\\') {
 #ifdef __CYGWIN__ 
         memcpy(res, "/cygdrive/", 10);
         res[10] = tolower(b[0]);
-        memcpy(res + 11, b + 2, strlen(b) - 2 + 1);
+        memcpy(res + 11, b + 2, len - 2 + 1);
 #endif
 #ifdef __MINGW32__ 
         res[0] = res[2] = '/';
         res[1] = tolower(b[0]);
-        memcpy(res + 3, b + 3, strlen(b) + 1 - 3);
+        memcpy(res + 3, b + 3, len - 3);
 #endif
         for (char *c = res; *c; c++) {
             *c = *c == '\\' ? '/' : *c;
         }
-    } else if (strlen(b) > 0 && b[0] == '/') {
-        memcpy(res, b, strlen(b) + 1);
+    } else if (len > 0 && b[0] == '/') {
+        memcpy(res, b, len);
     } else {
         int ln = strlen(root);
         memcpy(res, root, ln);
         res[ln] = '/';
-        memcpy(res + ln + 1, b, strlen(b) + 1);
+        memcpy(res + ln + 1, b, len);
     }
     return realpath(res, NULL);
 }
@@ -165,13 +181,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     if (l[0] == '/' && ++l >= end)
         return false;
 
-    int simple = _ISIMPLE;
-    for (const char *i = l; i < end; i++) {
-        if ((*i == '*' || *i == '?' || *i == '[' || *i == ']') && (i == l || *(i - 1) != '\\')) {
-            simple = 0;
-            break;
-        }
-    }
+    int simple = is_glob_path(l, end) ? 0 : _ISIMPLE;
     char *buf = (char *)malloc(end - l + 10);
     const char *slash = strrchr(l, '/');
     if (*(end - 1) == '/' && slash == end - 1) {
@@ -189,7 +199,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
 
 static struct matcher *_matcher_load_raw(char *dir, const char *f)
 {
-    char *path = join_path(dir, f);
+    char *path = join_path(dir, f, strlen(f));
     if (!path) 
         return NULL;
 
@@ -252,4 +262,11 @@ bool is_repo_bin(const char *dir, const char *name)
     if (strcmp(dot, ".hg") == 0 && strcmp(name, "store") == 0)
         return true;
     return false;
+}
+
+bool is_dir(const char *name)
+{
+    struct stat ss;
+    lstat(name, &ss); 
+    return S_ISDIR(ss.st_mode);
 }

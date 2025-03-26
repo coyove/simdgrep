@@ -89,6 +89,8 @@ struct grepper {
 
 int torune(uint32_t *rune, const char *s);
 
+const char *unsafecasestr(const char *s);
+
 void grepper_init(struct grepper *g, const char *find, bool ignore_case);
 
 struct grepper *grepper_add(struct grepper *g, const char *find);

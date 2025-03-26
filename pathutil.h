@@ -19,9 +19,11 @@ struct matcher {
     struct matcher *top;
 };
 
+const char *is_glob_path(const char *p, const char *end);
+
 const char *rel_path(const char *a, const char *b);
 
-char *join_path(const char *cwd, const char *b);
+char *join_path(const char *cwd, const char *b, int len);
 
 bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *rule, int n);
 
@@ -32,5 +34,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
 struct matcher *matcher_load_ignore_file(char *dir, struct matcher *parent, struct stack *matchers);
 
 bool is_repo_bin(const char *dir, const char *name);
+
+bool is_dir(const char *name);
 
 #endif

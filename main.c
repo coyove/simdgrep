@@ -12,10 +12,11 @@
 
 #define LOCK() pthread_mutex_lock(&flags.lock)
 #define UNLOCK() pthread_mutex_unlock(&flags.lock)
-#define LOG(msg, ...) if (flags.quiet < 0) { printf(msg, ##__VA_ARGS__); }
-#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); \
-    if (errno) fprintf(stderr, ": %s\n", strerror(errno)); else fprintf(stderr, "\n"); UNLOCK(); }
+#define DBG(msg, ...) if (flags.quiet < -1) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
+#define LOG(msg, ...) if (flags.quiet < 0) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
 #define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
+#define ERR0(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg "\n", ##__VA_ARGS__); UNLOCK(); }
+#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg ": %s\n", ##__VA_ARGS__, strerror(errno)); UNLOCK(); }
 
 static struct _flags {
     char cwd[PATH_MAX];
@@ -55,15 +56,7 @@ struct task *new_task(char *name, struct matcher *m, bool is_dir)
     return t;
 }
 
-static bool is_dir(const char *name)
-{
-    struct stat ss;
-    lstat(name, &ss); 
-    return S_ISDIR(ss.st_mode);
-}
-
 struct stack tasks;
-struct stack files;
 struct stack matchers;
 struct grepper g;
 
@@ -75,28 +68,15 @@ void *push(void *arg)
 
 NEXT:
     if (!stack_pop(&tasks, (void **)&t)) {
-        if (!stack_pop(&files, (void **)&t)) {
-            p->sigs[p->i] = 0;
-            for (int i = 0; i < flags.num_threads; i++) {
-                if (atomic_load(&p->sigs[i])) {
-                    struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 /* 1ms */ };
-                    nanosleep(&req, NULL);
-                    goto NEXT;
-                }
+        p->sigs[p->i] = 0;
+        for (int i = 0; i < flags.num_threads; i++) {
+            if (atomic_load(&p->sigs[i])) {
+                struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 /* 1ms */ };
+                nanosleep(&req, NULL);
+                goto NEXT;
             }
-            return 0;
         }
-        atomic_store(&p->sigs[p->i], 1);
-
-        p->ctx.file_name = t->name;
-        int res = grepper_file(&g, &p->ctx);
-        if (res != 0) {
-            ERR("read %s", t->name);
-        }
-        if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
-            WARN("%s has long line >%dK, matches may be incomplete\n", t->name, flags.line_size / 1024);
-        }
-        goto CLEANUP_TASK;
+        return 0;
     }
     atomic_store(&p->sigs[p->i], 1);
 
@@ -105,7 +85,7 @@ NEXT:
         ln = t->name[ln - 1] == '/' ? ln - 1 : ln;
         if (!matcher_match(t->m, t->name, true, reason, sizeof(reason))) {
             atomic_fetch_add(&flags.ignores, 1);
-            LOG("ignore directory %s\n", reason);
+            DBG("ignore directory %s\n", reason);
             goto CLEANUP_TASK;
         }
 
@@ -113,7 +93,7 @@ NEXT:
         if (!flags.no_ignore) {
             struct matcher *m = matcher_load_ignore_file(t->name, root, &matchers);
             if (m) {
-                LOG("load ignore file from %s\n", m->root);
+                DBG("load ignore file from %s\n", m->root);
                 root = m;
             }
         }
@@ -128,27 +108,29 @@ NEXT:
             const char *dname = dirent->d_name;
             if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0)
                 continue;
-            char *buf = (char *)malloc(ln + 1 + strlen(dname) + 1);
-            if (strcmp(t->name, ".") == 0) {
-                memcpy(buf, dname, strlen(dname) + 1);
-            } else {
-                memcpy(buf, t->name, ln);
-                memcpy(buf + ln, "/", 1);
-                memcpy(buf + ln + 1, dname, strlen(dname) + 1);
-            }
-            bool id = dirent->d_type == DT_DIR;
-            if (dirent->d_type == DT_UNKNOWN)
-                id = is_dir(buf);
-            stack_push(&tasks, new_task(buf, root, id));
+            char *n = (char *)malloc(ln + 1 + strlen(dname) + 1);
+            memcpy(n, t->name, ln);
+            memcpy(n + ln, "/", 1);
+            memcpy(n + ln + 1, dname, strlen(dname) + 1);
+            stack_push(&tasks, new_task(n, root,
+                        dirent->d_type == DT_UNKNOWN ? is_dir(n) :
+                        dirent->d_type == DT_DIR));
         }
         closedir(dir);
     } else {
-        if (matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
-            stack_push(&files, t);
-            goto NEXT;
+        if (!matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
+            atomic_fetch_add(&flags.ignores, 1);
+            DBG("ignore file %s\n", reason);
+        } else {
+            p->ctx.file_name = t->name;
+            int res = grepper_file(&g, &p->ctx);
+            if (res != 0) {
+                ERR("read %s", t->name);
+            }
+            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
+                WARN("%s has long line >%dK, matches may be incomplete\n", t->name, flags.line_size / 1024);
+            }
         }
-        atomic_fetch_add(&flags.ignores, 1);
-        LOG("ignore file %s\n", reason);
     }
 
 CLEANUP_TASK:
@@ -157,23 +139,21 @@ CLEANUP_TASK:
     goto NEXT;
 }
 
-void print_ssns(const char *a, const char *b, int len, const char *c)
+void print_n(const char *a, const char *b, int len, const char *c)
 {
     if (a && *a)
         fwrite(a, 1, strlen(a), stdout);
-
     fwrite(b, 1, len, stdout);
-
     if (c && *c)
         fwrite(c, 1, strlen(c), stdout);
 }
 
-void print_sss(const char *a, const char *b, const char *c)
+void print_s(const char *a, const char *b, const char *c)
 {
-    print_ssns(a, b, strlen(b), c);
+    print_n(a, b, strlen(b), c);
 }
 
-void print_sis(const char *a, uint64_t b, const char *c)
+void print_i(const char *a, uint64_t b, const char *c)
 {
     char buf[32];
     char *s = buf + 32;
@@ -181,7 +161,7 @@ void print_sis(const char *a, uint64_t b, const char *c)
         *(--s) = b % 10 + '0';
         b /= 10;
     } while(b);
-    print_ssns(a, s, buf + 32 - s, c);
+    print_n(a, s, buf + 32 - s, c);
 }
 
 bool grep_callback(const struct grepline *l)
@@ -204,36 +184,34 @@ bool grep_callback(const struct grepline *l)
 
         if (l->is_ctxline || !flags.color) {
             if (flags.verbose & 4)
-                print_sss(0, name, flags.verbose > 4 ? ":" : "");
+                print_s(0, name, flags.verbose > 4 ? ":" : "");
             if (flags.verbose & 2)
-                print_sis(0, l->nr + 1, (flags.verbose & 1) ? ":" : "");
+                print_i(0, l->nr + 1, (flags.verbose & 1) ? ":" : "");
             if (flags.verbose & 1) {
-                print_sss(0, i == 0 ? "" : "...", 0);
-                print_ssns(0, l->line + i, j - i, 0);
-                print_sss(0, j == l->len ? "" : "...", "");
+                print_s(0, i == 0 ? "" : "...", 0);
+                print_n(0, l->line + i, j - i, 0);
+                print_s(0, j == l->len ? "" : "...", 0);
             }
-            if (flags.verbose)
-                print_sss(0, "\n", 0);
         } else {
             if (flags.verbose & 4)
-                print_sss("\033[0;35m", name, flags.verbose > 4 ? "\033[0m:" : "\033[0m"); 
+                print_s("\033[0;35m", name, flags.verbose > 4 ? "\033[0m:" : "\033[0m"); 
             if (flags.verbose & 2)
-                print_sis("\033[1;32m", l->nr + 1, (flags.verbose & 1) ? "\033[0m:" : "\033[0m"); 
+                print_i("\033[1;32m", l->nr + 1, (flags.verbose & 1) ? "\033[0m:" : "\033[0m"); 
             if (flags.verbose & 1) {
                 // left ellipsis
-                print_sss("\033[1;33m", i == 0 ? "" : "...", "\033[0m"); 
+                print_s("\033[1;33m", i == 0 ? "" : "...", "\033[0m"); 
                 // before context
-                print_ssns(0, l->line + i, l->match_start - i, 0); 
+                print_n(0, l->line + i, l->match_start - i, 0); 
                 // hightlight match
-                print_ssns("\033[1;31m", l->line + l->match_start, l->match_end - l->match_start, "\033[0m"); 
+                print_n("\033[1;31m", l->line + l->match_start, l->match_end - l->match_start, "\033[0m"); 
                 // after context
-                print_ssns(0, l->line + l->match_end, j - l->match_end, 0); 
+                print_n(0, l->line + l->match_end, j - l->match_end, 0); 
                 // right ellipsis
-                print_sss("\033[1;33m", j == l->len ? "" : "...", "\033[0m"); 
+                print_s("\033[1;33m", j == l->len ? "" : "...", "\033[0m"); 
             }
-            if (flags.verbose)
-                print_sss(0, "\n", 0);
         }
+        if (flags.verbose)
+            print_s(0, "\n", 0);
     }
     UNLOCK();
     return flags.verbose != 4; // 4: filename only
@@ -243,31 +221,30 @@ void usage()
 {
     printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
     printf("PATTERN syntax is POSIX extended regex\n");
-    printf("FILE starting with '+' is an include pattern, e.g.:\n");
-    printf("\tsimdgrep PATTERN dir '+*.c'\n");
-    printf("FILE starting with '-' is an exclude pattern, e.g.:\n");
-    printf("\tsimdgrep PATTERN dir '-**/testdata'\n");
+    printf("FILE can contain glob patterns if you prefer simdgrep expanding it for you\n");
+    printf("\te.g.: simdgrep PATTERN './dir/**/*.c'\n");
     printf("\n");
     printf("\t-F\tfixed string pattern\n");
     printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
     printf("\t-P\tprint results without coloring\n");
     printf("\t-G\tsearch all files regardless of .gitignore\n");
+    printf("\t-E\texclude glob patterns\n");
     printf("\t-f\tsearch file name instead of file content\n");
-    printf("\t-q\tsuppress warning messages\n");
-    printf("\t-qq\tsuppress error messages\n");
+    printf("\t-q/-qq\tsuppress warning/error messages\n");
+    printf("\t-V/-VV\tenable log/debug messages\n");
     printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: content)\n");
-    printf("\t\te.g.: -v5 means print filename and matched content\n");
+    printf("\t\te.g.: -v5 means printing filename and matched content\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
-    printf("\t-x N\ttruncate lines longer than N bytes to make output compact\n");
+    printf("\t-x N\ttruncate long matched lines to N bytes to make output compact\n");
     printf("\t-A N\tprint N lines of trailing context\n");
-    printf("\t-B N\tprint N lines of leading context\n");
+    printf("\t-B N\tprint N lines of leading context, actual N of printable lines\n");
+    printf("\t\tis affected by the max line length at runtime\n");
     printf("\t-C N\tcombine -A N and -B N\n");
-    printf("\t-M N\tdefine max line length in N kilobytes, any lines longer will be\n");
-    printf("\t\tsplit into parts, thus matches may be incomplete at split \n");
-    printf("\t\tpoints (default: 64K)\n");
+    printf("\t-M N\tdefine max line length in N kilobytes (default: 64K), \n");
+    printf("\t\tany lines longer will be split into parts, thus matches may be\n");
+    printf("\t\tincomplete at split points\n");
     printf("\t-J N\tN of threads for searching\n");
-    printf("\t-V\tdebug ouput\n");
     abort();
 }
 
@@ -275,7 +252,7 @@ int main(int argc, char **argv)
 {
     // return 0;
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
-        ERR("simdgrep can't start");
+        ERR0("simdgrep can't start");
         return 0; 
     } 
     flags.fixed_string = flags.no_ignore = false;
@@ -285,23 +262,24 @@ int main(int argc, char **argv)
     flags.quiet = 0;
     flags.xbytes = 1e8;
     flags.verbose = 7;
-    memset(&flags.default_matcher, 0, sizeof(struct matcher));
-    flags.default_matcher.top = &flags.default_matcher;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));
 
+    memset(&flags.default_matcher, 0, sizeof(struct matcher));
+    flags.default_matcher.top = &flags.default_matcher;
+
     memset(&tasks, 0, sizeof(tasks));
-    memset(&matchers, 0, sizeof(tasks));
+    memset(&matchers, 0, sizeof(matchers));
     memset(&g, 0, sizeof(g));
     g.callback = grep_callback;
 
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "hfFVZPqGaIM:A:B:C:x:j:v:")) != -1) {
+    while ((cop = getopt(argc, argv, "hfFVZPqGaIM:A:B:C:E:x:j:v:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'f': g.search_name = true; flags.verbose = 4; break;
-        case 'V': flags.quiet = -1; break;
+        case 'V': flags.quiet--; break;
         case 'Z': flags.ignore_case = false; break;
         case 'P': flags.color = false; break; 
         case 'q': flags.quiet++; break;
@@ -315,6 +293,10 @@ int main(int argc, char **argv)
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
         case 'j': flags.num_threads = MAX(1, atoi(optarg)); break;
         case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
+        case 'E':
+                  LOG("* add exclude pattern %s\n", optarg);
+                  matcher_add_rule(&flags.default_matcher, optarg, optarg + strlen(optarg), false);
+                  break;
         default: usage();
         }
     }
@@ -334,14 +316,17 @@ int main(int argc, char **argv)
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
     LOG("* print -%d+%d lines\n", g.before_lines, g.after_lines);
-    LOG("* line context bytes +-%d\n", flags.xbytes);
+    LOG("* line context %d bytes\n", flags.xbytes);
 
     if (flags.fixed_string) {
-        grepper_init(&g, expr, flags.ignore_case);
+        const char *uc = unsafecasestr(expr);
+        grepper_init(&g, expr, flags.ignore_case && uc == NULL);
+        if (flags.ignore_case && uc)
+            WARN("can't ignore case of '%s' due to special chars, conduct exact searching\n", uc);
     } else {
         grepper_init_rx(&g, expr, flags.ignore_case);
         if (g.rx.error) {
-            ERR("invalid expression: %s", g.rx.error);
+            ERR0("invalid expression: %s", g.rx.error);
             goto EXIT;
         }
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
@@ -356,21 +341,21 @@ int main(int argc, char **argv)
         const char *name = argv[arg_files];
         if (strlen(name) == 0)
             continue;
-        if (name[0] == '+') {
-            matcher_add_rule(&flags.default_matcher, name + 1, name + strlen(name), true);
-            LOG("* add include pattern %s\n", name + 1);
-        } else if (name[0] == '-') {
-            matcher_add_rule(&flags.default_matcher, name + 1, name + strlen(name), false);
-            LOG("* add exclude pattern %s\n", name + 1);
+        const char *g = is_glob_path(name, name + strlen(name));
+        char *joined;
+        if (g) {
+            matcher_add_rule(&flags.default_matcher, g, g + strlen(g), true);
+            LOG("* add include pattern %s\n", g);
+            joined = name == g ? join_path(flags.cwd, ".", 1) : join_path(flags.cwd, name, g - name);
         } else {
-            char *resolved = join_path(flags.cwd, name);
-            if (!resolved) {
-                ERR("can't resolve path %s", name);
-                abort();
-            }
-            LOG("* search %s\n", resolved);
-            stack_push(&tasks, new_task(resolved, &flags.default_matcher, is_dir(resolved)));
+            joined = join_path(flags.cwd, name, strlen(name));
         }
+        if (!joined) {
+            ERR("can't resolve path %s", name);
+            abort();
+        }
+        LOG("* search %s\n", joined);
+        stack_push(&tasks, new_task(joined, &flags.default_matcher, is_dir(joined)));
     }
     if (tasks.count == 0) {
         stack_push(&tasks, new_task(strdup(flags.cwd), &flags.default_matcher, true));
@@ -389,8 +374,7 @@ int main(int argc, char **argv)
     }
 
     int num_walks = stack_free(&tasks);
-    int num_files = stack_free(&files);
-    LOG("* walked %d entries, searched %d files\n", num_walks, num_files);
+    LOG("* searched %d files\n", num_walks);
 
     FOREACH(&matchers, n) matcher_free((struct matcher *)n->value);
     int num_ignores = stack_free(&matchers);

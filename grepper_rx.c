@@ -30,6 +30,18 @@ static bool safecase(uint32_t r)
     return (d == 0 || d == 32) && utf8_encode(tmp, lo) == utf8_encode(tmp, hi);
 }
 
+const char *unsafecasestr(const char *s)
+{
+    while (*s) {
+        uint32_t r;
+        int n = torune(&r, s);
+        if (!safecase(r))
+            return s;
+        s += n;
+    }
+    return NULL;
+}
+
 static int _rx_skip_bracket(const char *s, int i)
 {
     int depth = 1;
