@@ -2,9 +2,11 @@
 
 #include "STC/include/stc/csview.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 
@@ -104,8 +106,8 @@ const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t ma
             );
     __m256i shuffle32 = _mm256_set_epi32(3, 2, 1, 4, 3, 2, 1, 0);
 
-    while (s <= end - 4) {
-        __m256i src = _mm256_loadu_si256((__m256i *)s); // may overflow, but we reserved at least 33 bytes after 'end', it's okay.
+    while (s <= end - 32) {
+        __m256i src = _mm256_loadu_si256((__m256i *)s);
         src = _mm256_permutevar8x32_epi32(src, shuffle32);
         // for (int i = 0; i < 32; i++) printf("%02x%s", *((uint8_t *)&src + i), i % 4 == 3 ? "|" : " "); printf("\n");
 
@@ -123,12 +125,16 @@ const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t ma
         // printf("%08x\n", matches);
         if (matches) {
             int one = __builtin_ctzll(matches) / 4;
-            s += one;
-            return s > end - 4 ? NULL : s;
+            return s + one;
         }
         s += 16;
     }
 
+    while (s < end - 3) {
+        if ((*(uint32_t *)s & mask4) == (v4 & mask4))
+            return s;
+        s++;
+    }
     return 0;
 }
 
@@ -546,23 +552,24 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
 
     int fd = 0;
     if (g->search_name) {
-        buffer_reset(lb, 0);
-        lb->read = lb->len = lb->datalen = strlen(ctx->file_name) + 1;
+        buffer_reset(lb, 0, false);
+        lb->file_size = lb->read = lb->len = lb->datalen = strlen(ctx->file_name);
         memcpy(lb->buffer, ctx->file_name, lb->len);
     } else {
         fd = open(ctx->file_name, O_RDONLY);
         if (fd < 0)
-            return -1;
-
-        buffer_reset(lb, fd);
-        buffer_fill(lb);
+            goto FAILED0;
+        if (!buffer_reset(lb, fd, !g->slow_rx))
+            goto FAILED;
+        if (!buffer_fill(lb))
+            goto FAILED;
     }
 
     lb->is_binary = indexbyte(lb->buffer, lb->buffer + MIN(lb->len, 1024), 0);
     if (lb->is_binary) {
         switch (g->binary_mode) {
         case BINARY_IGNORE:
-            goto CLEANUP;
+            goto EXIT;
         case BINARY:
             lb->binary_matching = true;
         }
@@ -584,7 +591,7 @@ int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
             const char *line_end = _indexlf(s, end);
 
             if (!g->callback(_ctxline(&gl, gl.nr, s, line_end)))
-                goto CLEANUP;
+                goto EXIT;
 
             last_hit = s = line_end + 1;
             gl.nr++;
@@ -624,7 +631,7 @@ NG:
                 goto NG;
             }
 
-            if (!grepper_match(g, &gl, rx_match, line_start, s, line_end)) {
+            if (!grepper_match(g, &gl, lb, rx_match, line_start, s, line_end)) {
                 s = line_end + 1;
                 continue;
             }
@@ -642,16 +649,16 @@ NG:
                 }
                 for (ln--; ln >= 0; ln--) {
                     if (!g->callback(_ctxline(&gl, bak.nr - ln, beforelines[ln][0], beforelines[ln][1])))
-                        goto CLEANUP;
+                        goto EXIT;
                 }
                 gl = bak;
             }
 
             if (!g->callback(&gl))
-                goto CLEANUP;
+                goto EXIT;
 
             if (lb->binary_matching)
-                goto CLEANUP;
+                goto EXIT;
 
             for (int i = 0; i < g->after_lines; i++) {
                 const char *ss = line_end + 1;
@@ -664,20 +671,22 @@ NG:
                 }
 
                 if (!g->callback(_ctxline(&gl, gl.nr + 1, ss, line_end)))
-                    goto CLEANUP;
+                    goto EXIT;
 
                 last_hit = line_end;
             }
 
             s = line_end + 1;
         }
-        // if (lb->read >= ctx->file_size)
-        //     break;
-        buffer_fill(lb);
+        if (!buffer_fill(lb))
+            goto FAILED;
     }
  
-CLEANUP:
-    if (fd)
-        close(fd);
+EXIT:
+    buffer_release(lb);
     return 0;
+FAILED:
+    buffer_release(lb);
+FAILED0:
+    return -1;
 }

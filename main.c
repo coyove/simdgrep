@@ -25,10 +25,11 @@ static struct _flags {
     bool fixed_string;
     bool no_ignore;
     int num_threads;
-    int line_size;
     int quiet;
     int xbytes;
     int verbose;
+    int64_t line_size;
+    int64_t mmap_limit;
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
@@ -71,7 +72,7 @@ NEXT:
         p->sigs[p->i] = 0;
         for (int i = 0; i < flags.num_threads; i++) {
             if (atomic_load(&p->sigs[i])) {
-                struct timespec req = { .tv_sec = 0, .tv_nsec = 1000000 /* 1ms */ };
+                struct timespec req = { .tv_sec = 0, .tv_nsec = 2000000 /* 2ms */ };
                 nanosleep(&req, NULL);
                 goto NEXT;
             }
@@ -128,7 +129,7 @@ NEXT:
                 ERR("read %s", t->name);
             }
             if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
-                WARN("%s has long line >%dK, matches may be incomplete\n", t->name, flags.line_size / 1024);
+                WARN("%s has long line >%lldK, matches may be incomplete\n", t->name, flags.line_size / 1024);
             }
         }
     }
@@ -239,12 +240,12 @@ void usage()
     printf("\t-x N\ttruncate long matched lines to N bytes to make output compact\n");
     printf("\t-A N\tprint N lines of trailing context\n");
     printf("\t-B N\tprint N lines of leading context, actual N of printable lines\n");
-    printf("\t\tis affected by the max line length at runtime\n");
-    printf("\t-C N\tcombine -A N and -B N\n");
-    printf("\t-M N\tdefine max line length in N kilobytes (default: 64K), \n");
-    printf("\t\tany lines longer will be split into parts, thus matches may be\n");
-    printf("\t\tincomplete at split points\n");
-    printf("\t-J N\tN of threads for searching\n");
+    printf("\t\tis affected by -M and -m flags at runtime\n");
+    printf("\t-C N\tcombine (-A N) and (-B N)\n");
+    printf("\t-M N\tsplit lines longer than N kilobytes (default: 64K), thus\n");
+    printf("\t\tmatches may be incomplete at split points\n");
+    printf("\t-m N\tmemory map files larger than N megabytes (default: 64M)\n");
+    printf("\t-J N\tspawn N threads for searching\n");
     abort();
 }
 
@@ -258,9 +259,10 @@ int main(int argc, char **argv)
     flags.fixed_string = flags.no_ignore = false;
     flags.color = isatty(STDOUT_FILENO);
     flags.ignore_case = true;
-    flags.line_size = 65536;
     flags.quiet = 0;
     flags.xbytes = 1e8;
+    flags.line_size = 64 << 10;
+    flags.mmap_limit = 64 << 20; // 64MB
     flags.verbose = 7;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));
@@ -275,7 +277,7 @@ int main(int argc, char **argv)
 
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "hfFVZPqGaIM:A:B:C:E:x:j:v:")) != -1) {
+    while ((cop = getopt(argc, argv, "hfFVZPqGaIm:M:A:B:C:E:x:j:v:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'f': g.search_name = true; flags.verbose = 4; break;
@@ -286,7 +288,8 @@ int main(int argc, char **argv)
         case 'G': flags.no_ignore = true; break;
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
-        case 'M': flags.line_size = MAX(1, atoi(optarg)) * 1024; break;
+        case 'M': flags.line_size = MAX(1, atoi(optarg)) << 10; break;
+        case 'm': flags.mmap_limit = MAX(0, atoi(optarg)) << 20; break;
         case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
@@ -311,7 +314,7 @@ int main(int argc, char **argv)
         goto EXIT;
     
     LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
-    LOG("* line size: %dK\n", flags.line_size / 1024);
+    LOG("* line size: %lldK, mmap limit: %lldM\n", flags.line_size >> 10, flags.mmap_limit >> 20);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
@@ -366,6 +369,7 @@ int main(int argc, char **argv)
         payloads[i].sigs = sigs;
         payloads[i].ctx.memo = &payloads[i];
         buffer_init(&payloads[i].ctx.lbuf, flags.line_size);
+        payloads[i].ctx.lbuf.mmap_limit = flags.mmap_limit;
         pthread_create(&payloads[i].thread, NULL, push, (void *)&payloads[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {

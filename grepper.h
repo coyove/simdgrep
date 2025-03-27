@@ -60,9 +60,9 @@ struct grepline {
     int64_t nr;
     bool is_ctxline;
     const char *line;
-    int len;
-    int match_start;
-    int match_end;
+    int64_t len;
+    int64_t match_start;
+    int64_t match_end;
 };
 
 struct grepper {
@@ -87,6 +87,30 @@ struct grepper {
     struct grepper *next_g;
 };
 
+struct linebuf {
+    int fd;
+    int64_t file_size;
+    int64_t lines;
+    int64_t read;
+    int64_t len;
+    int64_t datalen;
+    int64_t buflen;
+    int64_t mmap_limit;
+    bool overflowed;
+    bool binary_matching;
+    bool is_binary;
+    bool is_mmap;
+    bool allow_mmap;
+    char *buffer;
+    char *_free;
+};
+
+struct grepper_ctx {
+    void *memo;
+    const char *file_name;
+    struct linebuf lbuf;
+};
+
 int torune(uint32_t *rune, const char *s);
 
 const char *unsafecasestr(const char *s);
@@ -99,7 +123,8 @@ void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
-bool grepper_match(struct grepper *, struct grepline *, csview *, const char *, const char *, const char *);
+bool grepper_match(struct grepper *, struct grepline *, struct linebuf *,
+        csview *, const char *, const char *, const char *);
 
 int grepper_file(struct grepper *, struct grepper_ctx *);
 
@@ -111,51 +136,65 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
 void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 
-// line buffer
-//
-struct linebuf {
-    int fd;
-    int64_t lines;
-    int64_t read;
-    int len;
-    int datalen;
-    int buflen;
-    bool overflowed;
-    bool binary_matching;
-    bool is_binary;
-    char *buffer;
-};
-
-struct grepper_ctx {
-    void *memo;
-    int64_t file_size;
-    const char *file_name;
-    struct linebuf lbuf;
-};
-
-static void buffer_init(struct linebuf *l, int line_size)
+static void buffer_init(struct linebuf *l, int64_t line_size)
 {
     memset(l, 0, sizeof(struct linebuf));
     l->buflen = line_size;
     /* 
        Regex will use this buffer to do matching and temporarily place NULL at
-       the end of line, reserve 1 byte for the last line of the file.
+       the end of line, and some functions may search over the memory boundary,
+       so we reserve more bytes than needed.
        */
-    l->buffer = (char *)malloc(line_size + 33);
+    l->_free = l->buffer = (char *)malloc(line_size + 33);
 }
 
-static void buffer_reset(struct linebuf *l, int fd)
+static void buffer_release(struct linebuf *l)
+{
+    if (l->is_mmap)
+        munmap(l->buffer, l->file_size);
+    if (l->fd)
+        close(l->fd);
+}
+
+static bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap)
 {
     l->read = 0;
     l->fd = fd;
-    l->overflowed = l->binary_matching = false;
+    l->allow_mmap = allow_mmap;
+    l->is_mmap = l->overflowed = l->binary_matching = false;
     l->lines = l->len = l->datalen = 0;
+    l->buffer = l->_free;
+    if (!fd) {
+        l->file_size = 0;
+        return true;
+    }
+    l->file_size = lseek(fd, 0, SEEK_END);
+    if (l->file_size < 0)
+        return false;
+    if (lseek(fd, 0, SEEK_SET) < 0)
+        return false;
+    return true;
 }
 
-static void buffer_fill(struct linebuf *l)
+static bool buffer_fill(struct linebuf *l)
 {
+    if (l->read >= l->file_size) {
+        // End of file.
+        l->len = l->datalen = 0;
+        return true;
+    }
+
     if (l->fd == 0)
-        return;
+        return true;
+
+    if (l->allow_mmap && l->file_size >= l->mmap_limit) {
+        l->is_mmap = true;
+        l->buffer = (char *)mmap(0, l->file_size, PROT_READ, MAP_SHARED, l->fd, 0);
+        if (l->buffer == MAP_FAILED)
+            return false;
+        l->read = l->len = l->datalen = l->file_size;
+        return true;
+    }
 
     if (!l->binary_matching)
         l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
@@ -166,9 +205,8 @@ static void buffer_fill(struct linebuf *l)
 
     // Fill rest space.
     int n = read(l->fd, l->buffer + l->len, l->buflen - l->len);
-    if (n <= 0) {
-        return;
-    }
+    if (n < 0)
+        return false;
 
     l->len += n;
     l->datalen += n;
@@ -181,11 +219,17 @@ static void buffer_fill(struct linebuf *l)
         l->overflowed = true;
         l->read += n;
     }
+
+    // struct radvisory ra;
+    // ra.ra_offset = l->read;
+    // ra.ra_count = l->buflen;
+    // fcntl(l->fd, F_RDADVISE, &ra);
+    return true;
 }
 
 static void buffer_free(struct linebuf *l)
 {
-    free(l->buffer);
+    free(l->_free);
 }
 
 static int64_t now() {

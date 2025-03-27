@@ -241,21 +241,33 @@ UNSUPPORTED:
     snprintf(g->rx.error, 256, "invalid escape at '%s'", s + i - 1);
 }
 
-bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
+bool grepper_match(struct grepper *g, struct grepline *gl, struct linebuf *lb, csview *rx_match,
         const char *line_start, const char *s, const char *line_end)
 {
     if (g->rx.use_regex) {
         const char *rx_start = g->rx.fixed_start ? s : line_start;
-        char end = *line_end;
+        char end_ch = *line_end;
+        int rc;
 
-        *(char *)line_end = 0;
-        int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
-        *(char *)line_end = end;
+        if (lb->is_mmap) {
+            int64_t n = MIN(line_end - rx_start, lb->buflen);
+            memcpy(lb->_free, rx_start, n);
+            lb->_free[n + 1] = 0;
+            rc = cregex_match(&g->rx.engine, lb->_free, rx_match);
+        } else {
+            *(char *)line_end = 0;
+            rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
+            *(char *)line_end = end_ch;
+        }
 
         if (rc != CREG_OK)
             return false;
 
-        gl->match_start = rx_match[0].buf - line_start;
+        if (lb->is_mmap) {
+            gl->match_start = rx_match[0].buf - lb->_free + (rx_start - line_start);
+        } else {
+            gl->match_start = rx_match[0].buf - line_start;
+        }
         gl->match_end = gl->match_start + rx_match[0].size;
         return true;
     }

@@ -199,10 +199,11 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
 
 static struct matcher *_matcher_load_raw(char *dir, const char *f)
 {
-    char *path = join_path(dir, f, strlen(f));
-    if (!path) 
-        return NULL;
-
+    char *path = (char *)malloc(strlen(dir) + 1 + strlen(f) + 1);
+    memcpy(path, dir, strlen(dir));
+    memcpy(path + strlen(dir), "/", 1);
+    memcpy(path + strlen(dir) + 1, f, strlen(f));
+    memcpy(path + strlen(dir) + 1 + strlen(f), "", 1);
     char *line = NULL;
     size_t len = 0;
     ssize_t read;
