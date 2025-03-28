@@ -90,20 +90,21 @@ NEXT:
             goto CLEANUP_TASK;
         }
 
+        DIR *dir = opendir(t->name);
+        if (dir == NULL) {
+            ERR("open %s", t->name);
+            goto CLEANUP_TASK;
+        }
+
         struct matcher *root = t->m;
         if (!flags.no_ignore) {
-            struct matcher *m = matcher_load_ignore_file(t->name, root, &matchers);
+            struct matcher *m = matcher_load_ignore_file(dirfd(dir), t->name, root, &matchers);
             if (m) {
                 DBG("load ignore file from %s\n", m->root);
                 root = m;
             }
         }
 
-        DIR *dir = opendir(t->name);
-        if (dir == NULL) {
-            ERR("open %s", t->name);
-            goto CLEANUP_TASK;
-        }
         struct dirent *dirent;
         while ((dirent = readdir(dir)) != NULL) {
             const char *dname = dirent->d_name;
@@ -245,6 +246,7 @@ void usage()
     printf("\t-M N\tsplit lines longer than N kilobytes (default: 64K), thus\n");
     printf("\t\tmatches may be incomplete at split points\n");
     printf("\t-m N\tmemory map files larger than N megabytes (default: 64M)\n");
+    printf("\t\t0 means disable memory map\n");
     printf("\t-J N\tspawn N threads for searching\n");
     abort();
 }
@@ -380,7 +382,10 @@ int main(int argc, char **argv)
     int num_walks = stack_free(&tasks);
     LOG("* searched %d files\n", num_walks);
 
-    FOREACH(&matchers, n) matcher_free((struct matcher *)n->value);
+    FOREACH(&matchers, n) {
+        matcher_free((struct matcher *)n->value);
+        free((struct matcher *)n->value);
+    }
     int num_ignores = stack_free(&matchers);
     if (flags.no_ignore) {
         LOG("* all files are searched, no ignores\n");

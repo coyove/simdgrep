@@ -31,7 +31,7 @@ void matcher_free(struct matcher *m);
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl);
 
-struct matcher *matcher_load_ignore_file(char *dir, struct matcher *parent, struct stack *matchers);
+struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers);
 
 bool is_repo_bin(const char *dir, const char *name);
 

@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #include "pathutil.h"
@@ -202,8 +203,8 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
     char *path = (char *)malloc(strlen(dir) + 1 + strlen(f) + 1);
     memcpy(path, dir, strlen(dir));
     memcpy(path + strlen(dir), "/", 1);
-    memcpy(path + strlen(dir) + 1, f, strlen(f));
-    memcpy(path + strlen(dir) + 1 + strlen(f), "", 1);
+    memcpy(path + strlen(dir) + 1, f, strlen(f) + 1);
+
     char *line = NULL;
     size_t len = 0;
     ssize_t read;
@@ -227,25 +228,34 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
     m->root = path;
     m->file = f;
 
-    if (m->excludes.count + m->negate_excludes.count == 0) {
-        matcher_free(m);
-        return NULL;
-    }
-    return m;
+    if (m->excludes.count + m->negate_excludes.count > 0)
+        return m;
+
+    matcher_free(m);
+    free(m);
+    return NULL;
 }
 
-struct matcher *matcher_load_ignore_file(char *dir, struct matcher *parent, struct stack *matchers)
+struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers)
 {
-    struct matcher *m = _matcher_load_raw(dir, ".git/info/exclude");
+    struct matcher *m = NULL;
+    bool enter_repo = false;
+    if (faccessat(dirfd, ".git", F_OK, AT_SYMLINK_NOFOLLOW) != 0)
+        goto GITIGNORE;
+
+    enter_repo = true;
+    m = _matcher_load_raw(dir, ".git/info/exclude");
     if (m) {
-        m->parent = parent;
+        m->parent = parent->top;
         m->top = parent->top;
         stack_push(matchers, m);
         parent = m;
     }
+
+GITIGNORE:
     m = _matcher_load_raw(dir, ".gitignore");
     if (m) {
-        m->parent = parent;
+        m->parent = enter_repo ? parent->top : parent;
         m->top = parent->top;
         stack_push(matchers, m);
     }

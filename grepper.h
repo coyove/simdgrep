@@ -92,6 +92,7 @@ struct linebuf {
     int64_t file_size;
     int64_t lines;
     int64_t read;
+    int64_t off;
     int64_t len;
     int64_t datalen;
     int64_t buflen;
@@ -142,8 +143,7 @@ static void buffer_init(struct linebuf *l, int64_t line_size)
     l->buflen = line_size;
     /* 
        Regex will use this buffer to do matching and temporarily place NULL at
-       the end of line, and some functions may search over the memory boundary,
-       so we reserve more bytes than needed.
+       the end of line, so we reserve more bytes than needed.
        */
     l->_free = l->buffer = (char *)malloc(line_size + 33);
 }
@@ -158,7 +158,7 @@ static void buffer_release(struct linebuf *l)
 
 static bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap)
 {
-    l->read = 0;
+    l->off = l->read = 0;
     l->fd = fd;
     l->allow_mmap = allow_mmap;
     l->is_mmap = l->overflowed = l->binary_matching = false;
@@ -170,8 +170,6 @@ static bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap)
     }
     l->file_size = lseek(fd, 0, SEEK_END);
     if (l->file_size < 0)
-        return false;
-    if (lseek(fd, 0, SEEK_SET) < 0)
         return false;
     return true;
 }
@@ -187,12 +185,12 @@ static bool buffer_fill(struct linebuf *l)
     if (l->fd == 0)
         return true;
 
-    if (l->allow_mmap && l->file_size >= l->mmap_limit) {
+    if (l->allow_mmap && l->mmap_limit && l->file_size >= l->mmap_limit) {
         l->is_mmap = true;
         l->buffer = (char *)mmap(0, l->file_size, PROT_READ, MAP_SHARED, l->fd, 0);
         if (l->buffer == MAP_FAILED)
             return false;
-        l->read = l->len = l->datalen = l->file_size;
+        l->off = l->read = l->len = l->datalen = l->file_size;
         return true;
     }
 
@@ -204,13 +202,22 @@ static bool buffer_fill(struct linebuf *l)
     l->len = l->datalen = l->datalen - l->len;
 
     // Fill rest space.
-    int n = read(l->fd, l->buffer + l->len, l->buflen - l->len);
+    int n = pread(l->fd, l->buffer + l->len, l->buflen - l->len, l->off);
     if (n < 0)
         return false;
 
     l->len += n;
     l->datalen += n;
+    l->off += n;
 
+    if (l->off >= l->file_size) {
+        // We just reached EOF, no need to limit the buffer to full lines.
+        l->read = l->off;
+        return true;
+    }
+
+    // Truncate the buffer to full lines, this creates some tailing bytes which will
+    // be processed in the next round.
     const char *end = indexlastbyte(l->buffer, l->buffer + l->datalen, '\n');
     if (end) {
         l->len = end - l->buffer + 1;
@@ -221,7 +228,7 @@ static bool buffer_fill(struct linebuf *l)
     }
 
     // struct radvisory ra;
-    // ra.ra_offset = l->read;
+    // ra.ra_offset = l->off;
     // ra.ra_count = l->buflen;
     // fcntl(l->fd, F_RDADVISE, &ra);
     return true;
