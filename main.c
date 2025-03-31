@@ -264,7 +264,11 @@ int main(int argc, char **argv)
     flags.quiet = 0;
     flags.xbytes = 1e8;
     flags.line_size = 64 << 10;
+#ifdef __APPLE__
+    flags.mmap_limit = 0; // disable mmap
+#else
     flags.mmap_limit = 64 << 20; // 64MB
+#endif
     flags.verbose = 7;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));

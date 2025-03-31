@@ -250,7 +250,7 @@ bool grepper_match(struct grepper *g, struct grepline *gl, struct linebuf *lb, c
         int rc;
 
         if (lb->is_mmap) {
-            int64_t n = MIN(line_end - rx_start, lb->buflen);
+            int64_t n = MIN(line_end - rx_start, lb->bufsize);
             memcpy(lb->_free, rx_start, n);
             lb->_free[n + 1] = 0;
             rc = cregex_match(&g->rx.engine, lb->_free, rx_match);

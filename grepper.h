@@ -42,6 +42,12 @@ static const int MAX_BRUTE_FORCE_LENGTH = 0;
 #define BINARY_TEXT 1
 #define BINARY_IGNORE 2
 
+static int64_t now() {
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    return start.tv_sec * 1000000000L + start.tv_nsec;
+}
+
 struct grepper_ctx;
 
 struct rx_pattern_info {
@@ -95,7 +101,7 @@ struct linebuf {
     int64_t off;
     int64_t len;
     int64_t datalen;
-    int64_t buflen;
+    int64_t bufsize;
     int64_t mmap_limit;
     bool overflowed;
     bool binary_matching;
@@ -137,112 +143,14 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
 void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 
-static void buffer_init(struct linebuf *l, int64_t line_size)
-{
-    memset(l, 0, sizeof(struct linebuf));
-    l->buflen = line_size;
-    /* 
-       Regex will use this buffer to do matching and temporarily place NULL at
-       the end of line, so we reserve more bytes than needed.
-       */
-    l->_free = l->buffer = (char *)malloc(line_size + 33);
-}
+void buffer_init(struct linebuf *l, int64_t line_size);
 
-static void buffer_release(struct linebuf *l)
-{
-    if (l->is_mmap)
-        munmap(l->buffer, l->file_size);
-    if (l->fd)
-        close(l->fd);
-}
+void buffer_release(struct linebuf *l);
 
-static bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap)
-{
-    l->off = l->read = 0;
-    l->fd = fd;
-    l->allow_mmap = allow_mmap;
-    l->is_mmap = l->overflowed = l->binary_matching = false;
-    l->lines = l->len = l->datalen = 0;
-    l->buffer = l->_free;
-    if (!fd) {
-        l->file_size = 0;
-        return true;
-    }
-    l->file_size = lseek(fd, 0, SEEK_END);
-    if (l->file_size < 0)
-        return false;
-    return true;
-}
+bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap);
 
-static bool buffer_fill(struct linebuf *l)
-{
-    if (l->read >= l->file_size) {
-        // End of file.
-        l->len = l->datalen = 0;
-        return true;
-    }
+bool buffer_fill(struct linebuf *l);
 
-    if (l->fd == 0)
-        return true;
-
-    if (l->allow_mmap && l->mmap_limit && l->file_size >= l->mmap_limit) {
-        l->is_mmap = true;
-        l->buffer = (char *)mmap(0, l->file_size, PROT_READ, MAP_SHARED, l->fd, 0);
-        if (l->buffer == MAP_FAILED)
-            return false;
-        l->off = l->read = l->len = l->datalen = l->file_size;
-        return true;
-    }
-
-    if (!l->binary_matching)
-        l->lines += countbyte(l->buffer, l->buffer + l->len, '\n');
-
-    // Move tailing bytes forward.
-    memcpy(l->buffer, l->buffer + l->len, l->datalen - l->len);
-    l->len = l->datalen = l->datalen - l->len;
-
-    // Fill rest space.
-    int n = pread(l->fd, l->buffer + l->len, l->buflen - l->len, l->off);
-    if (n < 0)
-        return false;
-
-    l->len += n;
-    l->datalen += n;
-    l->off += n;
-
-    if (l->off >= l->file_size) {
-        // We just reached EOF, no need to limit the buffer to full lines.
-        l->read = l->off;
-        return true;
-    }
-
-    // Truncate the buffer to full lines, this creates some tailing bytes which will
-    // be processed in the next round.
-    const char *end = indexlastbyte(l->buffer, l->buffer + l->datalen, '\n');
-    if (end) {
-        l->len = end - l->buffer + 1;
-        l->read += l->len;
-    } else if (l->datalen == l->buflen) {
-        l->overflowed = true;
-        l->read += n;
-    }
-
-    // struct radvisory ra;
-    // ra.ra_offset = l->off;
-    // ra.ra_count = l->buflen;
-    // fcntl(l->fd, F_RDADVISE, &ra);
-    return true;
-}
-
-static void buffer_free(struct linebuf *l)
-{
-    free(l->_free);
-}
-
-static int64_t now() {
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    return start.tv_sec * 1000000000L + start.tv_nsec;
-}
+void buffer_free(struct linebuf *l);
 
 #endif
