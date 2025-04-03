@@ -35,31 +35,24 @@ static struct _flags {
     int64_t _Atomic ignores;
 } flags;
 
-struct payload {
-    pthread_t thread;
-    int i;
-    uint32_t _Atomic *sigs;
-    struct grepper_ctx ctx;
-};
-
 struct task {
     char *name;
     bool is_dir;
     struct matcher *m;
 };
 
-struct task *new_task(char *name, struct matcher *m, bool is_dir)
+struct stack tasks;
+struct stack matchers;
+struct grepper g;
+
+void new_task(char *name, struct matcher *m, bool is_dir)
 {
     struct task *t = (struct task *)malloc(sizeof(struct task));
     t->name = name;
     t->m = m;
     t->is_dir = is_dir;
-    return t;
+    stack_push(&tasks, t);
 }
-
-struct stack tasks;
-struct stack matchers;
-struct grepper g;
 
 void *push(void *arg) 
 {
@@ -69,17 +62,14 @@ void *push(void *arg)
 
 NEXT:
     if (!stack_pop(&tasks, (void **)&t)) {
-        p->sigs[p->i] = 0;
-        for (int i = 0; i < flags.num_threads; i++) {
-            if (atomic_load(&p->sigs[i])) {
-                struct timespec req = { .tv_sec = 0, .tv_nsec = 2000000 /* 2ms */ };
-                nanosleep(&req, NULL);
-                goto NEXT;
-            }
+        if (atomic_load(p->actives)) {
+            struct timespec req = { .tv_sec = 0, .tv_nsec = 2000000 /* 2ms */ };
+            nanosleep(&req, NULL);
+            goto NEXT;
         }
         return 0;
     }
-    atomic_store(&p->sigs[p->i], 1);
+    atomic_fetch_add(p->actives, 1);
 
     if (t->is_dir) {
         size_t ln = strlen(t->name);
@@ -114,9 +104,9 @@ NEXT:
             memcpy(n, t->name, ln);
             memcpy(n + ln, "/", 1);
             memcpy(n + ln + 1, dname, strlen(dname) + 1);
-            stack_push(&tasks, new_task(n, root,
+            new_task(n, root,
                         dirent->d_type == DT_UNKNOWN ? is_dir(n) :
-                        dirent->d_type == DT_DIR));
+                        dirent->d_type == DT_DIR);
         }
         closedir(dir);
     } else {
@@ -129,7 +119,7 @@ NEXT:
             if (res != 0) {
                 ERR("read %s", t->name);
             }
-            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary && flags.quiet == 0) {
+            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary) {
                 WARN("%s has long line >%lldK, matches may be incomplete\n", t->name, flags.line_size / 1024);
             }
         }
@@ -138,6 +128,7 @@ NEXT:
 CLEANUP_TASK:
     free(t->name);
     free(t);
+    atomic_fetch_add(p->actives, -1);
     goto NEXT;
 }
 
@@ -313,7 +304,7 @@ int main(int argc, char **argv)
         usage();
 
     struct payload payloads[flags.num_threads];
-    uint32_t _Atomic sigs[flags.num_threads];
+    int32_t _Atomic actives = 0;
 
     const char *expr = argv[optind];
     if (strlen(expr) == 0)
@@ -364,18 +355,16 @@ int main(int argc, char **argv)
             abort();
         }
         LOG("* search %s\n", joined);
-        stack_push(&tasks, new_task(joined, &flags.default_matcher, is_dir(joined)));
+        new_task(joined, &flags.default_matcher, is_dir(joined));
     }
     if (tasks.count == 0) {
-        stack_push(&tasks, new_task(strdup(flags.cwd), &flags.default_matcher, true));
+        new_task(strdup(flags.cwd), &flags.default_matcher, true);
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
-        payloads[i].i = i;
-        payloads[i].sigs = sigs;
+        payloads[i].actives = &actives;
         payloads[i].ctx.memo = &payloads[i];
-        buffer_init(&payloads[i].ctx.lbuf, flags.line_size);
-        payloads[i].ctx.lbuf.mmap_limit = flags.mmap_limit;
+        buffer_init(&payloads[i].ctx.lbuf, flags.line_size, flags.mmap_limit);
         pthread_create(&payloads[i].thread, NULL, push, (void *)&payloads[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {

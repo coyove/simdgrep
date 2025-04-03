@@ -7,3 +7,4 @@ out.*
 simdgrep
 test*.txt
 *.dSYM
+*.o

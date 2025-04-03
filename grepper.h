@@ -100,7 +100,7 @@ struct linebuf {
     int64_t read;
     int64_t off;
     int64_t len;
-    int64_t datalen;
+    int64_t truelen;
     int64_t bufsize;
     int64_t mmap_limit;
     bool overflowed;
@@ -110,12 +110,21 @@ struct linebuf {
     bool allow_mmap;
     char *buffer;
     char *_free;
+    int32_t _Atomic _flock;
 };
+
+struct payload;
 
 struct grepper_ctx {
     void *memo;
     const char *file_name;
     struct linebuf lbuf;
+};
+
+struct payload {
+    pthread_t thread;
+    int32_t _Atomic *actives;
+    struct grepper_ctx ctx;
 };
 
 int torune(uint32_t *rune, const char *s);
@@ -143,13 +152,15 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
 void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 
-void buffer_init(struct linebuf *l, int64_t line_size);
+void buffer_init(struct linebuf *, int64_t, int64_t);
 
 void buffer_release(struct linebuf *l);
 
 bool buffer_reset(struct linebuf *l, int fd, bool allow_mmap);
 
-bool buffer_fill(struct linebuf *l);
+bool buffer_fill(struct grepper_ctx *ctx);
+
+bool buffer_prefill(struct linebuf *l);
 
 void buffer_free(struct linebuf *l);
 

@@ -256,7 +256,7 @@ bool grepper_match(struct grepper *g, struct grepline *gl, struct linebuf *lb, c
             rc = cregex_match(&g->rx.engine, lb->_free, rx_match);
         } else {
             *(char *)line_end = 0;
-            rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match);
+            rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match, CREG_DEFAULT);
             *(char *)line_end = end_ch;
         }
 
