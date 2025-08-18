@@ -36,9 +36,12 @@ static struct _flags {
 } flags;
 
 struct task {
+    struct stacknode node;
     char *name;
     bool is_dir;
+    bool is_grepfile_inited;
     struct matcher *m;
+    struct grepfile file;
 };
 
 struct stack tasks;
@@ -51,17 +54,19 @@ void new_task(char *name, struct matcher *m, bool is_dir)
     t->name = name;
     t->m = m;
     t->is_dir = is_dir;
-    stack_push(&tasks, t);
+    t->is_grepfile_inited = false;
+    stack_push(&tasks, (struct stacknode *)t);
 }
 
 void *push(void *arg) 
 {
-    struct payload *p = (struct payload *)arg;
-    struct task *t;
+    struct worker *p = (struct worker *)arg;
     char reason[1024];
+    struct task *t;
 
 NEXT:
-    if (!stack_pop(&tasks, (void **)&t)) {
+    t = (struct task *)stack_pop(&tasks);
+    if (!t) {
         if (atomic_load(p->actives)) {
             struct timespec req = { .tv_sec = 0, .tv_nsec = 2000000 /* 2ms */ };
             nanosleep(&req, NULL);
@@ -109,25 +114,52 @@ NEXT:
                         dirent->d_type == DT_DIR);
         }
         closedir(dir);
+    } else if (t->is_grepfile_inited) {
+        int res = buffer_fill(&t->file, &p->chunk);
+        if (res == FILL_OK) {
+            stack_push(&tasks, (struct stacknode *)t);
+            grepfile_process(&g, &t->file, &p->chunk);
+            goto NEXT_TASK;
+        } else if (res == FILL_EOF) {
+            // No need.
+        } else if (res == FILL_LAST_CHUNK) {
+            grepfile_process(&g, &t->file, &p->chunk);
+        } else {
+            ERR("read %s", t->name);
+        }
     } else {
         if (!matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
             atomic_fetch_add(&flags.ignores, 1);
             DBG("ignore file %s\n", reason);
         } else {
-            p->ctx.file_name = t->name;
-            int res = grepper_file(&g, &p->ctx);
-            if (res != 0) {
+            int res = grepfile_open(t->name, &g, &t->file, &p->chunk);
+            if (res == OPEN_BINARY_SKIPPED) {
+                WARN("ignore binary file %s", t->name);
+            } else if (res == FILL_EMPTY) {
+                // Empty file.
+            } else if (res == FILL_EOF) {
+            } else if (res == FILL_LAST_CHUNK) {
+                t->is_grepfile_inited = true;
+                grepfile_process(&g, &t->file, &p->chunk);
+            } else if (res == FILL_OK) {
+                t->is_grepfile_inited = true;
+                stack_push(&tasks, (struct stacknode *)t);
+                grepfile_process(&g, &t->file, &p->chunk);
+                goto NEXT_TASK;
+            } else {
                 ERR("read %s", t->name);
             }
-            if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary) {
-                WARN("%s has long line >%lldK, matches may be incomplete\n", t->name, flags.line_size / 1024);
-            }
+            // if (p->ctx.lbuf.overflowed && !p->ctx.lbuf.is_binary) {
+            //     WARN("%s has long line >%lldK, matches may be incomplete\n", t->name, flags.line_size / 1024);
+            // }
         }
     }
 
 CLEANUP_TASK:
     free(t->name);
     free(t);
+
+NEXT_TASK:
     atomic_fetch_add(p->actives, -1);
     goto NEXT;
 }
@@ -159,10 +191,9 @@ void print_i(const char *a, uint64_t b, const char *c)
 
 bool grep_callback(const struct grepline *l)
 {
-    struct payload *p = (struct payload *)l->ctx->memo;
-    const char *name = rel_path(flags.cwd, l->ctx->file_name);
+    const char *name = rel_path(flags.cwd, l->file->name);
     LOCK();
-    if (l->ctx->lbuf.is_binary && g.binary_mode == BINARY) {
+    if (l->file->is_binary && g.binary_mode == BINARY) {
         if (flags.verbose) {
             printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
         }
@@ -303,7 +334,7 @@ int main(int argc, char **argv)
     if (optind >= argc)
         usage();
 
-    struct payload payloads[flags.num_threads];
+    struct worker workers[flags.num_threads];
     int32_t _Atomic actives = 0;
 
     const char *expr = argv[optind];
@@ -362,22 +393,23 @@ int main(int argc, char **argv)
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
-        payloads[i].actives = &actives;
-        payloads[i].ctx.memo = &payloads[i];
-        buffer_init(&payloads[i].ctx.lbuf, flags.line_size, flags.mmap_limit);
-        pthread_create(&payloads[i].thread, NULL, push, (void *)&payloads[i]);
+        workers[i].actives = &actives;
+        memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
+        workers[i].chunk.buf_size = flags.line_size;
+        workers[i].chunk.buf = (char *)malloc(flags.line_size + 1);
+        pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
-        pthread_join(payloads[i].thread, NULL);
-        buffer_free(&payloads[i].ctx.lbuf);
+        pthread_join(workers[i].thread, NULL);
+        free(workers[i].chunk.buf);
     }
 
     int num_walks = stack_free(&tasks);
     LOG("* searched %d files\n", num_walks);
 
-    FOREACH(&matchers, n) {
-        matcher_free((struct matcher *)n->value);
-        free((struct matcher *)n->value);
+    FOREACH_STACK(&matchers, n) {
+        matcher_free((struct matcher *)n);
+        free(n);
     }
     int num_ignores = stack_free(&matchers);
     if (flags.no_ignore) {

@@ -10,6 +10,7 @@
 #include "wildmatch.h"
 
 struct matcher {
+    struct stacknode node;
     char *root;
     const char *file;
     struct stack includes;

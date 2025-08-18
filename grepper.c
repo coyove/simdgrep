@@ -487,53 +487,26 @@ static const char *indexcasestr_long(struct grepper *g, const char *s,
   return 0;
 }
 
-static const char *indexcasestr(struct grepper *g, const char *s,
-                                const char *end) {
-  if (s + g->len > end)
-    return 0;
+static const char *indexcasestr(struct grepper *g, const char *s, const char *end) {
+    if (s + g->len > end)
+        return 0;
 
-  if (s + g->len == end) {
-    if (g->ignore_case)
-      return strncasecmp(s, g->find, g->len) == 0 ? s : 0;
-    return strncmp(s, g->find, g->len) == 0 ? s : 0;
-  }
+    if (s + g->len == end) {
+        if (g->ignore_case)
+            return strncasecmp(s, g->find, g->len) == 0 ? s : 0;
+        return strncmp(s, g->find, g->len) == 0 ? s : 0;
+    }
 
-  if (g->len == 1) {
-    return g->ignore_case
-               ? indexcasebyte(s, end, tolower(*g->find), toupper(*g->find))
-               : indexbyte(s, end, *g->find);
-  }
+    if (g->len == 1) {
+        return g->ignore_case
+            ? indexcasebyte(s, end, tolower(*g->find), toupper(*g->find))
+            : indexbyte(s, end, *g->find);
+    }
 
-  if (g->len >= 4)
-    return indexcasestr_long4(g, s, end);
+    if (g->len >= 4)
+        return indexcasestr_long4(g, s, end);
 
-  return indexcasestr_long(g, s, end);
-}
-
-static const char *indexcasestr_rx(struct grepper *g, const char *s,
-                                   const char *end, csview *rx_match) {
-  char ch = *end;
-  *(char *)end = 0;
-  int rc = cregex_match_sv(&g->rx.engine, csview_from_n(s, end - s), rx_match,
-                           CREG_DEFAULT);
-  *(char *)end = ch;
-  if (rc != CREG_OK)
-    return NULL;
-  return rx_match[0].buf;
-}
-
-static const char *_indexlf(const char *s, const char *end) {
-  const char *ss = indexbyte(s, end, '\n');
-  return ss ? ss : end;
-}
-
-static struct grepline *_ctxline(struct grepline *gl, int64_t nr,
-                                 const char *start, const char *end) {
-  gl->nr = nr;
-  gl->line = start;
-  gl->match_start = gl->match_end = gl->len = end - start;
-  gl->is_ctxline = true;
-  return gl;
+    return indexcasestr_long(g, s, end);
 }
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
@@ -542,158 +515,194 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
-int grepper_file(struct grepper *g, struct grepper_ctx *ctx)
-{
-    // const char *zzz = "0123456789abcdefghijklmnop0123456789abcdef";
-    // const char *zzzres = index4bytes(zzz, zzz + strlen(zzz), *(uint32_t
-    // *)"ijkl", 0xDFDFDFDF); printf("%s\n", zzzres); exit(1);
-    const char *beforelines[g->before_lines][2];
-    csview rx_match[g->rx.groups];
-    struct linebuf *lb = &ctx->lbuf;
+static uint32_t zero = 0;
 
-    int fd = 0;
-    if (g->search_name) {
-        buffer_reset(lb, 0, false);
-        lb->file_size = lb->read = lb->len = lb->truelen = strlen(ctx->file_name);
-        memcpy(lb->buffer, ctx->file_name, lb->len);
-    } else {
-        fd = open(ctx->file_name, O_RDONLY);
-        if (fd < 0)
-            goto FAILED0;
-        if (!buffer_reset(lb, fd, !g->slow_rx))
-            goto FAILED;
-        if (!buffer_fill(ctx))
-            goto FAILED;
+int buffer_fill(struct grepfile *file, struct grepfile_chunk *part) {
+    while (!atomic_compare_exchange_weak(&file->lock, &zero, 1));
+
+    if (file->off >= file->size) {
+        atomic_store(&file->lock, 0);
+        return FILL_EOF;
     }
 
-    lb->is_binary = indexbyte(lb->buffer, lb->buffer + MIN(lb->len, 1024), 0);
-    if (lb->is_binary) {
+    // Record how many lines before this part.
+    part->prev_lines = file->lines;
+    ssize_t tail = file->tail_size;
+    if (tail > 0)
+        memcpy(part->buf, file->tail, tail);
+
+    // Fill buffer.
+    int n = pread(file->fd, part->buf + tail, part->buf_size - tail, file->off);
+    if (n < 0) {
+        atomic_store(&file->lock, 0);
+        return errno;
+    }
+    part->data_size = tail + n;
+    file->off += n;
+    file->tail_size = 0;
+
+    // Calc total lines.
+    if (!file->binary_matching)
+        file->lines += countbyte(part->buf, part->buf + part->data_size, '\n');
+
+    if (file->off < file->size) {
+        // Truncate the buffer to full lines, this creates some tailing bytes which
+        // will be processed in the next round.
+        char *bound = part->buf + part->data_size;
+        const char *end = indexlastbyte(part->buf, bound, '\n');
+        if (end) {
+            end++;
+            file->tail_size = bound - end;
+            memcpy(file->tail, end, file->tail_size);
+            part->data_size = end - part->buf;
+        }
+        atomic_store(&file->lock, 0);
+        return FILL_OK;
+    } else {
+        atomic_store(&file->lock, 0);
+        return FILL_LAST_CHUNK;
+    }
+}
+
+int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
+{
+    int fd = open(file_name, O_RDONLY);
+    if (fd < 0)
+        return errno;
+
+    size_t fs = lseek(fd, 0, SEEK_END);
+    if (fs < 0)
+        return errno;
+    if (fs == 0) {
+        close(fd);
+        return FILL_EMPTY;
+    }
+
+    memset(file, 0, sizeof(struct grepfile));
+    file->fd = fd;
+    file->size = fs;
+    file->name = file_name;
+    file->lines = 0;
+    file->off = 0;
+    file->binary_matching = 0;
+    file->lock = 0;
+    file->tail_size = 0;
+    file->tail = (char *)malloc(part->buf_size);
+
+    int res = buffer_fill(file, part);
+    if (res == FILL_LAST_CHUNK) {
+    } else if (res == FILL_OK) {
+    } else if (res == FILL_EOF) {
+    } else {
+        return errno;
+    }
+
+    file->is_binary = indexbyte(part->buf, part->buf + MIN(part->data_size, 1024), 0);
+    if (file->is_binary) {
         switch (g->binary_mode) {
             case BINARY_IGNORE:
-                goto EXIT;
+                close(fd);
+                return OPEN_BINARY_SKIPPED;
             case BINARY:
-                lb->binary_matching = true;
+                file->binary_matching = true;
         }
     }
+    return res;
+}
 
-    int remain_after_lines = 0;
+int grepfile_release(struct grepfile *file)
+{
+    close(file->fd);
+}
 
-    while (lb->len) {
-        struct grepline gl = {
-            .ctx = ctx,
-            .g = g,
-            .nr = lb->lines,
-            .is_ctxline = false,
-        };
-        const char *s = lb->buffer, *last_hit = lb->buffer,
-              *end = lb->buffer + lb->len;
+int grepfile_process(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
+{
+    csview rx_match[g->rx.groups];
+    struct grepline gl = {
+        .g = g,
+        .file = file,
+        .nr = part->prev_lines,
+        .is_ctxline = false,
+    };
+    const char *s = part->buf, *last_hit = part->buf, *end = part->buf + part->data_size;
 
-        // Process the remaining afterlines from the prev line buffer.
-        for (int i = 0; remain_after_lines > 0 && s < end;
-                i++, remain_after_lines--) {
-            const char *line_end = _indexlf(s, end);
-
-            if (!g->callback(_ctxline(&gl, gl.nr, s, line_end)))
-                goto EXIT;
-
-            last_hit = s = line_end + 1;
-            gl.nr++;
+    while (s < end) {
+        if (g->slow_rx) {
+            char ch = *end;
+            *(char *)end = 0;
+            int rc = cregex_match_sv(&g->rx.engine, csview_from_n(s, end - s), rx_match, CREG_DEFAULT);
+            *(char *)end = ch;
+            s = rc != CREG_OK ? 0 : rx_match[0].buf;
+        } else {
+            s = indexcasestr(g, s, end);
         }
+        if (!s)
+            break;
 
-        while (s < end) {
-            s = g->slow_rx ? indexcasestr_rx(g, s, end, rx_match)
-                : indexcasestr(g, s, end);
-            if (!s)
-                break;
+        const char *line_start = indexlastbyte(part->buf, s, '\n');
+        line_start = line_start ? line_start + 1 : part->buf;
 
-            const char *line_start = indexlastbyte(lb->buffer, s, '\n');
-            line_start = line_start ? line_start + 1 : lb->buffer;
+        const char *line_end = indexbyte(s, end, '\n');
+        if (!line_end)
+            line_end = end;
 
-            const char *line_end = _indexlf(s, end);
+        gl.nr += countbyte(last_hit, s, '\n');
+        last_hit = s;
 
-            gl.nr += countbyte(last_hit, s, '\n');
-            last_hit = s;
+        gl.line = line_start;
+        gl.len = line_end - line_start;
+        gl.match_start = s - line_start;
+        gl.match_end = s + g->len - line_start;
+        gl.is_ctxline = false;
 
-            gl.line = line_start;
-            gl.len = line_end - line_start;
-            gl.match_start = s - line_start;
-            gl.match_end = s + g->len - line_start;
-            gl.is_ctxline = false;
-
-            struct grepper *ng = g->next_g;
-            const char *ss = s + g->len;
+        struct grepper *ng = g->next_g;
+        const char *ss = s + g->len;
 NG:
-            if (ng) {
-                ss = indexcasestr(ng, ss, line_end);
-                if (!ss) {
-                    s += g->len;
-                    continue;
-                }
-                ss = ss + ng->len;
-                ng = ng->next_g;
-                gl.match_end = ss - line_start;
-                goto NG;
-            }
-
-            if (!grepper_match(g, &gl, lb, rx_match, line_start, s, line_end)) {
-                s = line_end + 1;
+        if (ng) {
+            ss = indexcasestr(ng, ss, line_end);
+            if (!ss) {
+                s += g->len;
                 continue;
             }
+            ss = ss + ng->len;
+            ng = ng->next_g;
+            gl.match_end = ss - line_start;
+            goto NG;
+        }
 
-            if (g->before_lines) {
-                // Print before lines. TODO: print across line buffer
-                struct grepline bak = gl;
-                int ln = 0;
-                for (const char *bs = line_start;
-                        bs > lb->buffer && !lb->binary_matching && ln < g->before_lines;
-                        ln++) {
-                    const char *ss = indexlastbyte(lb->buffer, bs - 1, '\n');
-                    ss = ss ? ss + 1 : lb->buffer;
-                    beforelines[ln][0] = ss;
-                    beforelines[ln][1] = bs - 1;
-                    bs = ss;
-                }
-                for (ln--; ln >= 0; ln--) {
-                    if (!g->callback(_ctxline(&gl, bak.nr - ln, beforelines[ln][0],
-                                    beforelines[ln][1])))
-                        goto EXIT;
-                }
-                gl = bak;
+        if (!grepper_match(g, &gl, rx_match, line_start, s, line_end)) {
+            s = line_end + 1;
+            continue;
+        }
+
+        if (!g->callback(&gl))
+            goto EXIT;
+
+        if (file->binary_matching)
+            goto EXIT;
+
+        for (int i = 0; i < g->after_lines; i++) {
+            const char *ss = line_end + 1;
+            line_end = indexbyte(ss, end, '\n');
+            if (!line_end) {
+                // Continue printing afterlines when the next line buffer is filled.
+                line_end = end;
+                goto EXIT;
             }
 
+            gl.nr++;
+            gl.line = ss;
+            gl.match_start = gl.match_end = gl.len = line_end - ss;
+            gl.is_ctxline = true;
             if (!g->callback(&gl))
                 goto EXIT;
 
-            if (lb->binary_matching)
-                goto EXIT;
-
-            for (int i = 0; i < g->after_lines; i++) {
-                const char *ss = line_end + 1;
-                line_end = indexbyte(ss, end, '\n');
-                if (!line_end) {
-                    // Continue printing afterlines when the next line buffer is filled.
-                    line_end = end;
-                    remain_after_lines = g->after_lines - i;
-                    break;
-                }
-
-                if (!g->callback(_ctxline(&gl, gl.nr + 1, ss, line_end)))
-                    goto EXIT;
-
-                last_hit = line_end;
-            }
-
-            s = line_end + 1;
+            last_hit = line_end;
         }
-        if (!buffer_fill(ctx))
-            goto FAILED;
+
+        s = line_end + 1;
     }
 
 EXIT:
-    buffer_release(lb);
     return 0;
-FAILED:
-    buffer_release(lb);
-FAILED0:
-    return -1;
 }

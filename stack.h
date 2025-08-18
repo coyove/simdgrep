@@ -5,13 +5,12 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
-#define FOREACH(s, n) for (struct stacknode *n = (s)->root; n; n = n->next) 
+#define FOREACH_STACK(s, n) \
+    for (struct stacknode *n = atomic_load(&(s)->root), *n##next = 0; \
+            (n##next = n ? atomic_load(&n->next) : 0, n); n = n##next)
 
 struct stacknode {
-    void *value;
-    _Atomic int32_t removed;
     struct stacknode * _Atomic next;
-    struct stacknode * _Atomic next2;
 };
 
 struct stack {
@@ -19,13 +18,11 @@ struct stack {
     struct stacknode * _Atomic root;
 };
 
-void stack_push(struct stack *l, void *v);
+void stack_push(struct stack *, struct stacknode *);
 
-bool stack_pop(struct stack *l, void **v);
+struct stacknode *stack_pop(struct stack *);
 
-int stack_free(struct stack *l);
-
-void stack_print(struct stack *l);
+size_t stack_free(struct stack *);
 
 #endif
 

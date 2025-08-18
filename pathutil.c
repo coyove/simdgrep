@@ -106,8 +106,8 @@ static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_di
 
 static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_dir)
 {
-    FOREACH(&m->negate_excludes, n) {
-        if (_matcher_wildmatch(n->value, name, is_dir))
+    FOREACH_STACK(&m->negate_excludes, n) {
+        if (_matcher_wildmatch((char *)n + 8, name, is_dir))
             return true;
     }
     if (m->parent)
@@ -122,8 +122,8 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         name = rel_path(m->root, name);
 
     bool incl = is_dir || m->top->includes.count == 0;
-    FOREACH(&m->top->includes, n) {
-        if (_matcher_wildmatch(n->value, name, is_dir)) {
+    FOREACH_STACK(&m->top->includes, n) {
+        if (_matcher_wildmatch((char *)n + 8, name, is_dir)) {
             incl = true;
             break;
         }
@@ -134,11 +134,11 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         return false;
     }
 
-    FOREACH(&m->excludes, n) {
-        if (_matcher_wildmatch(n->value, name, is_dir)) {
+    FOREACH_STACK(&m->excludes, n) {
+        char *v = (char *)n + 8;
+        if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
                 if (reason) {
-                    char *v = n->value;
                     snprintf(reason, rn, "%s -> %s/%s -> (%c)%s",
                             name, m->root, m->file, v[0] & 0x7F, v + 1);
                 }
@@ -153,12 +153,6 @@ void matcher_free(struct matcher *m)
 {
     if (m->root)
         free(m->root);
-    FOREACH(&m->includes, n)
-        free(n->value);
-    FOREACH(&m->excludes, n)
-        free(n->value);
-    FOREACH(&m->negate_excludes, n)
-        free(n->value);
     stack_free(&m->includes);
     stack_free(&m->excludes);
     stack_free(&m->negate_excludes);
@@ -183,7 +177,8 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
         return false;
 
     int simple = is_glob_path(l, end) ? 0 : _ISIMPLE;
-    char *buf = (char *)malloc(end - l + 10);
+    char *node = (char *)malloc(8 + end - l + 10);
+    char *buf = node + 8;
     const char *slash = strrchr(l, '/');
     if (*(end - 1) == '/' && slash == end - 1) {
         buf[0] = simple | _IDIR; // 'abc/': match directory only
@@ -194,7 +189,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     }
     memcpy(buf + 1, l, end - l);
     buf[1 + end - l] = 0;
-    stack_push(incl ? &m->includes : ss, buf);
+    stack_push(incl ? &m->includes : ss, (struct stacknode *)node);
     return true;
 }
 
@@ -248,7 +243,7 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
     if (m) {
         m->parent = parent->top;
         m->top = parent->top;
-        stack_push(matchers, m);
+        stack_push(matchers, (struct stacknode *)m);
         parent = m;
     }
 
@@ -257,7 +252,7 @@ GITIGNORE:
     if (m) {
         m->parent = enter_repo ? parent->top : parent;
         m->top = parent->top;
-        stack_push(matchers, m);
+        stack_push(matchers, (struct stacknode *)m);
     }
     return m;
 }
