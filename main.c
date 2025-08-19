@@ -55,6 +55,7 @@ void new_task(char *name, struct matcher *m, bool is_dir)
     t->m = m;
     t->is_dir = is_dir;
     t->is_grepfile_inited = false;
+    memset(&t->file, 0, sizeof(struct grepfile));
     stack_push(&tasks, (struct stacknode *)t);
 }
 
@@ -396,7 +397,7 @@ int main(int argc, char **argv)
         workers[i].actives = &actives;
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
         workers[i].chunk.buf_size = flags.line_size;
-        workers[i].chunk.buf = (char *)malloc(flags.line_size + 1);
+        workers[i].chunk.buf = (char *)malloc(flags.line_size + 33);
         pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {

@@ -2,6 +2,7 @@
 #define _HEADER_S
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 

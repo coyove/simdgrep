@@ -67,30 +67,22 @@ std::ostream &operator<<(std::ostream &out, const uint8x8_t &v) {
 #include <smmintrin.h>
 
 int64_t countbyte(const char *s, const char *end, const uint8_t c) {
-  __m256i needle = _mm256_set1_epi8(c);
-  int64_t count = 0;
-  while (end - s >= 32) {
-    __m256i haystack =
-        _mm256_set_epi64x(*(uint64_t *)(s), *(uint64_t *)(s + 8),
-                          *(uint64_t *)(s + 16), *(uint64_t *)(s + 24));
-    __m256i res = _mm256_cmpeq_epi8(haystack, needle);
-    uint32_t map = _mm256_movemask_epi8(res);
-    count += __builtin_popcountll(map);
-    s += 32;
-  }
-  __m128i needle2 = _mm_set1_epi8(c);
-  while (end - s >= 16) {
-    __m128i haystack = _mm_set_epi64x(*(uint64_t *)(s), *(uint64_t *)(s + 8));
-    __m128i res = _mm_cmpeq_epi8(haystack, needle2);
-    uint16_t map = _mm_movemask_epi8(res);
-    count += __builtin_popcountll(map);
-    s += 16;
-  }
-  while (s < end) {
-    if (*s++ == c)
-      count++;
-  }
-  return count;
+    __m256i needle = _mm256_set1_epi8(c);
+    int64_t count = 0;
+    while (end - s >= 32) {
+        __m256i haystack = _mm256_loadu_si256((__m256i *)s);
+        __m256i res = _mm256_cmpeq_epi8(haystack, needle);
+        count += __builtin_popcountll(_mm256_movemask_epi8(res));
+        s += 32;
+    }
+    // __m256i haystack = _mm256_loadu_si256((__m256i *)s);
+    // __m256i res = _mm256_cmpeq_epi8(haystack, needle);
+    // count += __builtin_popcountll(_mm256_movemask_epi8(res) << (s + 32 - end));
+    while (s < end) {
+        if (*s++ == c)
+            count++;
+    }
+    return count;
 }
 
 const char *index4bytes(const char *s, const char *end, uint32_t v4,
@@ -515,10 +507,13 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
-static uint32_t zero = 0;
 
 int buffer_fill(struct grepfile *file, struct grepfile_chunk *part) {
-    while (!atomic_compare_exchange_weak(&file->lock, &zero, 1));
+    static uint32_t zero = 0;
+    int retries = 0;
+    while (!atomic_compare_exchange_weak(&file->lock, &zero, 1)) {
+        retries++;
+    }
 
     if (file->off >= file->size) {
         atomic_store(&file->lock, 0);
@@ -527,41 +522,32 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part) {
 
     // Record how many lines before this part.
     part->prev_lines = file->lines;
-    ssize_t tail = file->tail_size;
-    if (tail > 0)
-        memcpy(part->buf, file->tail, tail);
 
     // Fill buffer.
-    int n = pread(file->fd, part->buf + tail, part->buf_size - tail, file->off);
+    int n = pread(file->fd, part->buf, part->buf_size, file->off);
     if (n < 0) {
         atomic_store(&file->lock, 0);
         return errno;
     }
-    part->data_size = tail + n;
-    file->off += n;
-    file->tail_size = 0;
-
+    
     // Calc total lines.
     if (!file->binary_matching)
-        file->lines += countbyte(part->buf, part->buf + part->data_size, '\n');
+        file->lines += countbyte(part->buf, part->buf + n, '\n');
 
-    if (file->off < file->size) {
-        // Truncate the buffer to full lines, this creates some tailing bytes which
-        // will be processed in the next round.
-        char *bound = part->buf + part->data_size;
-        const char *end = indexlastbyte(part->buf, bound, '\n');
-        if (end) {
-            end++;
-            file->tail_size = bound - end;
-            memcpy(file->tail, end, file->tail_size);
-            part->data_size = end - part->buf;
-        }
-        atomic_store(&file->lock, 0);
-        return FILL_OK;
+    int res;
+    if (file->off + n < file->size) {
+        // Truncate the buffer to full lines.
+        const char *end = indexlastbyte(part->buf, part->buf + n, '\n');
+        if (end)
+            n = end + 1 - part->buf;
+        res = FILL_OK;
     } else {
-        atomic_store(&file->lock, 0);
-        return FILL_LAST_CHUNK;
+        res = FILL_LAST_CHUNK;
     }
+    part->data_size = n;
+    file->off += n;
+    atomic_store(&file->lock, 0);
+    return res;
 }
 
 int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
@@ -578,7 +564,6 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
         return FILL_EMPTY;
     }
 
-    memset(file, 0, sizeof(struct grepfile));
     file->fd = fd;
     file->size = fs;
     file->name = file_name;
@@ -586,8 +571,7 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
     file->off = 0;
     file->binary_matching = 0;
     file->lock = 0;
-    file->tail_size = 0;
-    file->tail = (char *)malloc(part->buf_size);
+    file->chunk_lines = (_Atomic(int64_t) *)malloc(8 * (fs + part->buf_size - 1) / part->buf_size);
 
     int res = buffer_fill(file, part);
     if (res == FILL_LAST_CHUNK) {
@@ -613,6 +597,7 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
 int grepfile_release(struct grepfile *file)
 {
     close(file->fd);
+    free(file->chunk_lines);
 }
 
 int grepfile_process(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)

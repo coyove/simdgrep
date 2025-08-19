@@ -103,13 +103,12 @@ struct grepfile {
     int fd;
     const char *name;
     int64_t size;
-    int64_t lines;
     int64_t off;
     bool binary_matching;
     bool is_binary;
     uint32_t _Atomic lock;
-    char *tail;
-    ssize_t tail_size;
+    int64_t _Atomic lines;
+    _Atomic(int64_t) *chunk_lines;
 };
 
 struct grepfile_chunk {
