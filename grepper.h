@@ -68,7 +68,7 @@ struct grefile;
 
 struct grepline {
     struct grepper *g;
-    struct grepfile *file;
+    struct grepfile_chunk *file;
     int64_t nr;
     bool is_ctxline;
     const char *line;
@@ -104,18 +104,20 @@ struct grepfile {
     const char *name;
     int64_t size;
     int64_t off;
-    bool binary_matching;
+    bool is_binary_matching;
     bool is_binary;
-    uint32_t _Atomic lock;
-    int64_t _Atomic lines;
-    _Atomic(int64_t) *chunk_lines;
+    int64_t lines;
+    pthread_mutex_t lock;
 };
 
 struct grepfile_chunk {
     int64_t prev_lines;
     char *buf;
+    char *name;
     ssize_t buf_size;
     ssize_t data_size;
+    bool is_binary_matching;
+    bool is_binary;
 };
 
 struct worker {
@@ -145,7 +147,7 @@ int grepfile_open(const char *, struct grepper *, struct grepfile *, struct grep
 
 int grepfile_release(struct grepfile *file);
 
-int grepfile_process(struct grepper *, struct grepfile *, struct grepfile_chunk *);
+bool grepfile_process(struct grepper *g, struct grepfile_chunk *part);
 
 int64_t countbyte(const char *s, const char *end, uint8_t c);
 
@@ -154,5 +156,7 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
 int buffer_fill(struct grepfile *, struct grepfile_chunk *);
+
+bool is_buffer_eof(struct grepfile *, struct grepfile_chunk *);
 
 #endif

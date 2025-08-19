@@ -33,13 +33,14 @@ static struct _flags {
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
+    int64_t _Atomic files;
 } flags;
 
 struct task {
     struct stacknode node;
     char *name;
     bool is_dir;
-    bool is_grepfile_inited;
+    bool is_grepping;
     struct matcher *m;
     struct grepfile file;
 };
@@ -48,15 +49,22 @@ struct stack tasks;
 struct stack matchers;
 struct grepper g;
 
+void push_task(struct task *t)
+{
+    stack_push(&tasks, (struct stacknode *)t);
+}
+
 void new_task(char *name, struct matcher *m, bool is_dir)
 {
     struct task *t = (struct task *)malloc(sizeof(struct task));
     t->name = name;
     t->m = m;
     t->is_dir = is_dir;
-    t->is_grepfile_inited = false;
+    t->is_grepping = false;
     memset(&t->file, 0, sizeof(struct grepfile));
-    stack_push(&tasks, (struct stacknode *)t);
+    push_task(t);
+    if (!is_dir)
+        atomic_fetch_add(&flags.files, 1);
 }
 
 void *push(void *arg) 
@@ -69,7 +77,7 @@ NEXT:
     t = (struct task *)stack_pop(&tasks);
     if (!t) {
         if (atomic_load(p->actives)) {
-            struct timespec req = { .tv_sec = 0, .tv_nsec = 2000000 /* 2ms */ };
+            struct timespec req = { .tv_sec = 0, .tv_nsec = 10000000 /* 10ms */ };
             nanosleep(&req, NULL);
             goto NEXT;
         }
@@ -115,19 +123,18 @@ NEXT:
                         dirent->d_type == DT_DIR);
         }
         closedir(dir);
-    } else if (t->is_grepfile_inited) {
+    } else if (t->is_grepping) {
+        if (is_buffer_eof(&t->file, &p->chunk))
+            goto CLEANUP_TASK;
+        push_task(t);
         int res = buffer_fill(&t->file, &p->chunk);
-        if (res == FILL_OK) {
-            stack_push(&tasks, (struct stacknode *)t);
-            grepfile_process(&g, &t->file, &p->chunk);
-            goto NEXT_TASK;
+        if (res == FILL_OK || res == FILL_LAST_CHUNK) {
+            grepfile_process(&g, &p->chunk);
         } else if (res == FILL_EOF) {
-            // No need.
-        } else if (res == FILL_LAST_CHUNK) {
-            grepfile_process(&g, &t->file, &p->chunk);
         } else {
             ERR("read %s", t->name);
         }
+        goto CONTINUE_LOOP;
     } else {
         if (!matcher_match(t->m, t->name, false, reason, sizeof(reason))) {
             atomic_fetch_add(&flags.ignores, 1);
@@ -135,18 +142,25 @@ NEXT:
         } else {
             int res = grepfile_open(t->name, &g, &t->file, &p->chunk);
             if (res == OPEN_BINARY_SKIPPED) {
-                WARN("ignore binary file %s", t->name);
+                // WARN("ignore binary file %s", t->name);
             } else if (res == FILL_EMPTY) {
                 // Empty file.
             } else if (res == FILL_EOF) {
+                abort(); // unreachable
             } else if (res == FILL_LAST_CHUNK) {
-                t->is_grepfile_inited = true;
-                grepfile_process(&g, &t->file, &p->chunk);
+                grepfile_process(&g, &p->chunk);
             } else if (res == FILL_OK) {
-                t->is_grepfile_inited = true;
-                stack_push(&tasks, (struct stacknode *)t);
-                grepfile_process(&g, &t->file, &p->chunk);
-                goto NEXT_TASK;
+                while (p->chunk.is_binary_matching) {
+                    if (!grepfile_process(&g, &p->chunk))
+                        goto CLEANUP_TASK;
+                    int res = buffer_fill(&t->file, &p->chunk);
+                    if (res != FILL_OK && res != FILL_LAST_CHUNK)
+                        goto CLEANUP_TASK;
+                }
+                t->is_grepping = true;
+                push_task(t);
+                grepfile_process(&g, &p->chunk);
+                goto CONTINUE_LOOP;
             } else {
                 ERR("read %s", t->name);
             }
@@ -157,10 +171,11 @@ NEXT:
     }
 
 CLEANUP_TASK:
+    grepfile_release(&t->file);
     free(t->name);
     free(t);
 
-NEXT_TASK:
+CONTINUE_LOOP:
     atomic_fetch_add(p->actives, -1);
     goto NEXT;
 }
@@ -198,6 +213,8 @@ bool grep_callback(const struct grepline *l)
         if (flags.verbose) {
             printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
         }
+        UNLOCK();
+        return false;
     } else {
         int i = 0, j = l->len;
         if (l->len > flags.xbytes + g.len + 10) {
@@ -270,7 +287,7 @@ void usage()
     printf("\t\tmatches may be incomplete at split points\n");
     printf("\t-m N\tmemory map files larger than N megabytes (default: 64M)\n");
     printf("\t\t0 means disable memory map\n");
-    printf("\t-J N\tspawn N threads for searching\n");
+    printf("\t-j N\tspawn N threads for searching\n");
     abort();
 }
 
@@ -405,18 +422,16 @@ int main(int argc, char **argv)
         free(workers[i].chunk.buf);
     }
 
-    int num_walks = stack_free(&tasks);
-    LOG("* searched %d files\n", num_walks);
+    stack_free(&tasks);
+    LOG("* searched %lld files\n", flags.files);
 
-    FOREACH_STACK(&matchers, n) {
+    FOREACH_STACK(&matchers, n)
         matcher_free((struct matcher *)n);
-        free(n);
-    }
-    int num_ignores = stack_free(&matchers);
+    int num_ignorefiles = stack_free(&matchers);
     if (flags.no_ignore) {
         LOG("* all files are searched, no ignores\n");
     } else {
-        LOG("* respected %d .gitignore, %lld files ignored\n", num_ignores, flags.ignores);
+        LOG("* respected %d .gitignore, %lld files ignored\n", num_ignorefiles, flags.ignores);
     }
     LOG("%lld falses\n", g.falses);
 

@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #ifdef __cplusplus
 
@@ -227,65 +228,88 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a) {
 #include <arm_neon.h>
 
 int64_t countbyte(const char *s, const char *end, uint8_t c) {
-  uint8x16_t needle = vdupq_n_u8(c);
-  int64_t count = 0;
+    uint8x16_t needle = vdupq_n_u8(c);
+    int64_t count = 0;
 
-  while (end - s >= 16) {
-    uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-    uint8x16_t res = vceqq_u8(haystack, needle);
+    while (end - s >= 16) {
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint8x16_t res = vceqq_u8(haystack, needle);
+        uint8x8_t r = vshrn_n_u16(res, 4);
+        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
+        count += __builtin_popcountll(matches);
+        s += 16;
+    }
+    count /= 4;
 
-    uint64_t mask1 = vgetq_lane_u64(vreinterpretq_u64_u8(res), 0);
-    uint64_t mask2 = vgetq_lane_u64(vreinterpretq_u64_u8(res), 1);
-
-    count += __builtin_popcountll(mask1);
-    count += __builtin_popcountll(mask2);
-
-    s += 16;
-  }
-
-  count /= 8;
-  while (s < end) {
-    if (*s++ == c)
-      count++;
-  }
-  return count;
+    while (s < end) {
+        if (*s++ == c)
+            count++;
+    }
+    return count;
 }
 
-const char *index4bytes(const char *s, const char *end, uint32_t v4,
-                        uint32_t mask4) {
-  uint16_t b = v4 >> 16, a = v4;
-  uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
-  uint8x16_t teeth = vdupq_n_u8(0x0F);
-  uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8};
-  uint8x16_t shuffle2 = {2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10};
-  // printf("%b\n", v4);
+static const char *strstr_safebound(const char *s, const char *end, const char* needle, size_t k) {
+    uint8x16_t first = vdupq_n_u8(needle[0]), last  = vdupq_n_u8(needle[k - 1]);
 
-  while (s <= end - 16) {
-    uint8x16_t p = vandq_u8(vld1q_u8((const uint8_t *)s), teeth);
+    while (s <= end - k) {
+        const uint8x16_t block_first = vld1q_u8((const uint8_t *)s);
+        const uint8x16_t block_last  = vld1q_u8((const uint8_t *)s + k - 1);
 
-    uint8x16_t haystack1 = vqtbl1q_u8(p, shuffle1);
-    uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
-    // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&haystack1 +
-    // i)); printf("\n"); for (int i = 0; i < 4; i++) printf("%04x ",
-    // *((uint16_t *)&res1 + i)); printf("\n");
-
-    uint16x8_t res = vreinterpretq_u16_u8(vsliq_n_u8(haystack1, haystack2, 4));
-    uint16x8_t mask = vceqq_u16(res, needle);
-    uint8x8_t r = vshrn_n_u16(mask, 1);
-    uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
-    if (matches > 0) {
-      int one = __builtin_ctzll(matches) / 8;
-      return s + one;
+        const uint8x16_t eq_first = vceqq_u8(first, block_first);
+        const uint8x16_t eq_last  = vceqq_u8(last, block_last);
+        uint8x8_t r = vshrn_n_u16(vandq_u8(eq_first, eq_last), 4);
+        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
+        while (matches) {
+            size_t i = __builtin_ctzll(matches);
+            matches = i == 60 ? 0 : matches >> (i + 4);
+            s += i / 4 + 1;
+            if (s >= end - k) {
+                return 0;
+            }
+            if (memcmp(s, needle + 1, k - 2) == 0) {
+                return s - 1;
+            }
+        }
+        s += 16;
     }
-    s += 8;
-  }
 
-  while (s < end - 3) {
-    if ((*(uint32_t *)s & mask4) == (v4 & mask4))
-      return s;
-    s++;
-  }
-  return 0;
+    return NULL;
+}
+
+const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t mask4) {
+    uint16_t b = v4 >> 16, a = v4;
+    uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
+    uint8x16_t teeth = vdupq_n_u8(0x0F), one = vdupq_n_u8(0xFF);
+    uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8};
+    uint8x16_t shuffle2 = {2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10};
+    // printf("%b\n", v4);
+
+    while (s <= end - 16) {
+        uint8x16_t p = vandq_u8(vld1q_u8((const uint8_t *)s), teeth);
+
+        uint8x16_t haystack1 = vqtbl1q_u8(p, shuffle1);
+        uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
+        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&haystack1 +
+        // i)); printf("\n"); for (int i = 0; i < 4; i++) printf("%04x ",
+        // *((uint16_t *)&res1 + i)); printf("\n");
+
+        uint16x8_t res = vreinterpretq_u16_u8(vsliq_n_u8(haystack1, haystack2, 4));
+        uint16x8_t mask = vceqq_u16(res, needle);
+        uint8x8_t r = vshrn_n_u16(mask, 4);
+        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
+        if (matches) {
+            int i = __builtin_ctzll(matches);
+            return s + i / 8;
+        }
+        s += 8;
+    }
+
+    while (s < end - 3) {
+        if ((*(uint32_t *)s & mask4) == (v4 & mask4))
+            return s;
+        s++;
+    }
+    return 0;
 }
 
 const char *index2bytes(const char *s, const char *end, uint16_t v,
@@ -440,23 +464,22 @@ void grepper_free(struct grepper *g) {
     free(g->rx.error);
 }
 
-static const char *indexcasestr_long4(struct grepper *g, const char *s,
-                                      const char *end) {
-  int64_t lf = g->len;
-  uint32_t v = *(uint32_t *)(g->find + lf - 4);
-  while (s <= end - lf) {
-    s = index4bytes(s + lf - 4, end, v, g->_case_mask32);
-    if (!s)
-      return s;
-    s -= lf - 4;
-    int j = lf - 1;
-    while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
-      --j;
-    if (j < 0)
-      return s;
-    s += MAX(1, j - g->_table[(uint8_t)s[j]]);
-  }
-  return 0;
+static const char *indexcasestr_long4(struct grepper *g, const char *s, const char *end) {
+    int64_t lf = g->len;
+    uint32_t v = *(uint32_t *)(g->find + lf - 4);
+    while (s <= end - lf) {
+        s = index4bytes(s + lf - 4, end, v, g->_case_mask32);
+        if (!s)
+            return s;
+        s -= lf - 4;
+        int j = lf - 1;
+        while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
+            --j;
+        if (j < 0)
+            return s;
+        s += MAX(1, j - g->_table[(uint8_t)s[j]]);
+    }
+    return 0;
 }
 
 static const char *indexcasestr_long(struct grepper *g, const char *s,
@@ -496,6 +519,7 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
     }
 
     if (g->len >= 4)
+        // return strstr_safebound(s, end, g->find, g->len);
         return indexcasestr_long4(g, s, end);
 
     return indexcasestr_long(g, s, end);
@@ -507,31 +531,44 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
+bool is_buffer_eof(struct grepfile *file, struct grepfile_chunk *part)
+{
+    if (file->off >= file->size)
+        return true;
+    pthread_mutex_lock(&file->lock);
+    bool eof = file->off >= file->size;
+    pthread_mutex_unlock(&file->lock);
+    return eof;
+}
 
-int buffer_fill(struct grepfile *file, struct grepfile_chunk *part) {
-    static uint32_t zero = 0;
-    int retries = 0;
-    while (!atomic_compare_exchange_weak(&file->lock, &zero, 1)) {
-        retries++;
-    }
+int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
+{
+    pthread_mutex_lock(&file->lock);
 
     if (file->off >= file->size) {
-        atomic_store(&file->lock, 0);
+        pthread_mutex_unlock(&file->lock);
         return FILL_EOF;
     }
 
     // Record how many lines before this part.
     part->prev_lines = file->lines;
+    part->is_binary = file->is_binary;
+    part->is_binary_matching = file->is_binary_matching;
+    if (part->name)
+        free(part->name);
+    part->name = strdup(file->name);
 
     // Fill buffer.
     int n = pread(file->fd, part->buf, part->buf_size, file->off);
     if (n < 0) {
-        atomic_store(&file->lock, 0);
+        // Only one caller will see the error (then process), others will get EOF.
+        file->off = file->size;
+        pthread_mutex_unlock(&file->lock);
         return errno;
     }
     
     // Calc total lines.
-    if (!file->binary_matching)
+    if (!file->is_binary_matching)
         file->lines += countbyte(part->buf, part->buf + n, '\n');
 
     int res;
@@ -546,7 +583,7 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part) {
     }
     part->data_size = n;
     file->off += n;
-    atomic_store(&file->lock, 0);
+    pthread_mutex_unlock(&file->lock);
     return res;
 }
 
@@ -565,13 +602,12 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
     }
 
     file->fd = fd;
-    file->size = fs;
     file->name = file_name;
+    file->size = fs;
     file->lines = 0;
     file->off = 0;
-    file->binary_matching = 0;
-    file->lock = 0;
-    file->chunk_lines = (_Atomic(int64_t) *)malloc(8 * (fs + part->buf_size - 1) / part->buf_size);
+    file->is_binary_matching = 0;
+    pthread_mutex_init(&file->lock, NULL);
 
     int res = buffer_fill(file, part);
     if (res == FILL_LAST_CHUNK) {
@@ -581,14 +617,13 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
         return errno;
     }
 
-    file->is_binary = indexbyte(part->buf, part->buf + MIN(part->data_size, 1024), 0);
+    part->is_binary = file->is_binary = indexbyte(part->buf, part->buf + part->data_size, 0);
     if (file->is_binary) {
         switch (g->binary_mode) {
             case BINARY_IGNORE:
-                close(fd);
                 return OPEN_BINARY_SKIPPED;
             case BINARY:
-                file->binary_matching = true;
+                part->is_binary_matching = file->is_binary_matching = true;
         }
     }
     return res;
@@ -596,16 +631,18 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
 
 int grepfile_release(struct grepfile *file)
 {
-    close(file->fd);
-    free(file->chunk_lines);
+    if (file->fd)
+        close(file->fd);
+    pthread_mutex_destroy(&file->lock); 
+    return 1;
 }
 
-int grepfile_process(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
+bool grepfile_process(struct grepper *g, struct grepfile_chunk *part)
 {
     csview rx_match[g->rx.groups];
     struct grepline gl = {
         .g = g,
-        .file = file,
+        .file = part,
         .nr = part->prev_lines,
         .is_ctxline = false,
     };
@@ -661,10 +698,7 @@ NG:
         }
 
         if (!g->callback(&gl))
-            goto EXIT;
-
-        if (file->binary_matching)
-            goto EXIT;
+            return false;
 
         for (int i = 0; i < g->after_lines; i++) {
             const char *ss = line_end + 1;

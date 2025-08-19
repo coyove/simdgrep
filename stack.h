@@ -7,16 +7,16 @@
 #include <stdatomic.h>
 
 #define FOREACH_STACK(s, n) \
-    for (struct stacknode *n = atomic_load(&(s)->root), *n##next = 0; \
-            (n##next = n ? atomic_load(&n->next) : 0, n); n = n##next)
+    for (struct stacknode *n = (struct stacknode *)(atomic_load(&(s)->root) << 1 >> 1), *n##next = 0; \
+            (n##next = n ? (struct stacknode *)(atomic_load(&n->next) << 1 >> 1) : 0, n); n = n##next)
 
 struct stacknode {
-    struct stacknode * _Atomic next;
+    uint64_t _Atomic next;
 };
 
 struct stack {
     _Atomic int64_t count;
-    struct stacknode * _Atomic root;
+    uint64_t _Atomic root;
 };
 
 void stack_push(struct stack *, struct stacknode *);
