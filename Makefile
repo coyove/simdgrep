@@ -17,8 +17,5 @@ sg: ${OBJS}
 %.o: %.c
 	$(CC) $(CFLAGS) -g -c $< -o $@
 
-mac_dispatch.o: mac_dispatch.m
-	$(CC) $(CFLAGS) -c $< -o $@
-
 clean:
 	rm -f $(OBJS) $(TARGET)

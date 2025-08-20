@@ -86,105 +86,6 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c) {
     return count;
 }
 
-const char *index4bytes(const char *s, const char *end, uint32_t v4,
-                        uint32_t mask4) {
-  v4 &= mask4;
-  __m256i needle = _mm256_set1_epi32(v4);
-  __m256i teeth = _mm256_set1_epi8((uint8_t)mask4);
-  __m256i shuffle1 =
-      _mm256_set_epi8(10, 9, 8, 7, 9, 8, 7, 6, 8, 7, 6, 5, 7, 6, 5, 4, 6, 5, 4,
-                      3, 5, 4, 3, 2, 4, 3, 2, 1, 3, 2, 1, 0);
-  __m256i shuffle2 = _mm256_set_epi8(2, 1, 0, 15, 1, 0, 15, 14, 0, 15, 14, 13,
-                                     15, 14, 13, 12, 14, 13, 12, 11, 13, 12, 11,
-                                     10, 12, 11, 10, 9, 11, 10, 9, 8);
-  __m256i shuffle32 = _mm256_set_epi32(3, 2, 1, 4, 3, 2, 1, 0);
-
-  while (s <= end - 32) {
-    __m256i src = _mm256_loadu_si256((__m256i *)s);
-    src = _mm256_permutevar8x32_epi32(src, shuffle32);
-    // for (int i = 0; i < 32; i++) printf("%02x%s", *((uint8_t *)&src + i), i %
-    // 4 == 3 ? "|" : " "); printf("\n");
-
-    src = _mm256_and_si256(src, teeth);
-    __m256i p1 = _mm256_shuffle_epi8(src, shuffle1);
-    __m256i p2 = _mm256_shuffle_epi8(src, shuffle2);
-    // for (int i = 0; i < 32; i++) printf("%02x%s", *((uint8_t *)&p1 + i), i %
-    // 4 == 3 ? "|" : " "); printf("\n"); for (int i = 0; i < 32; i++)
-    // printf("%02x%s", *((uint8_t *)&p2 + i), i % 4 == 3 ? "|" : " ");
-    // printf("\n");
-
-    __m256i mask1 = _mm256_cmpeq_epi32(p1, needle);
-    __m256i mask2 = _mm256_cmpeq_epi32(p2, needle);
-    uint32_t matches1 = _mm256_movemask_epi8(mask1);
-    uint32_t matches2 = _mm256_movemask_epi8(mask2);
-    uint64_t matches = (uint64_t)matches2 << 32 | matches1;
-    // printf("%08x\n", matches);
-    if (matches) {
-      int one = __builtin_ctzll(matches) / 4;
-      return s + one;
-    }
-    s += 16;
-  }
-
-  while (s < end - 3) {
-    if ((*(uint32_t *)s & mask4) == (v4 & mask4))
-      return s;
-    s++;
-  }
-  return 0;
-}
-
-const char *index2bytes(const char *s, const char *end, uint16_t v,
-                        uint8_t mask, uint16_t mask2) {
-  __m256i needle = _mm256_set1_epi16(v);
-  __m256i casemask = _mm256_set1_epi8(mask);
-  while (s <= end - 17) {
-    __m256i lo = _mm256_castsi128_si256(_mm_loadu_si128((__m128i *)s));
-    __m256i hi = _mm256_castsi128_si256(_mm_loadu_si128((__m128i *)(s + 1)));
-    __m256i haystack = _mm256_unpacklo_epi8(lo, hi);
-    haystack = _mm256_insertf128_si256(
-        haystack, _mm256_castsi256_si128(_mm256_unpackhi_epi8(lo, hi)), 1);
-    haystack = _mm256_and_si256(haystack, casemask);
-    __m256i res = _mm256_cmpeq_epi16(haystack, needle);
-    uint32_t bitmap = _mm256_movemask_epi8(res);
-    if (bitmap > 0) {
-      int one = __builtin_ctz(bitmap);
-      return s + one / 2;
-    }
-    s += 16;
-  }
-  for (; s < end - 1; ++s) {
-    if ((*(uint16_t *)s & mask2) == v)
-      return s;
-  }
-  return 0;
-}
-
-const char *indexcasebyte(const char *s, const char *end, const uint8_t lo,
-                          const uint8_t up) {
-  __m256i mask = _mm256_set_epi8(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6,
-                                 22, 7, 23, 8, 24, 9, 25, 10, 26, 11, 27, 12,
-                                 28, 13, 29, 14, 30, 15, 31);
-  __m256i needle = _mm256_set1_epi16((uint16_t)lo << 8 | (uint16_t)up);
-  while (s <= end - 16) {
-    uint64_t v1 = *(uint64_t *)(s), v2 = *(uint64_t *)(s + 8);
-    __m256i haystack =
-        _mm256_shuffle_epi8(_mm256_set_epi64x(v1, v1, v2, v2), mask);
-    __m256i res = _mm256_cmpeq_epi8(haystack, needle);
-    uint32_t map = _mm256_movemask_epi8(res);
-    if (map > 0) {
-      int one = __builtin_clzll(map) - 32;
-      return s + one / 2;
-    }
-    s += 16;
-  }
-  for (; s < end; ++s) {
-    if (*s == lo || *s == up)
-      return s;
-  }
-  return 0;
-}
-
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
   __m256i needle = _mm256_set1_epi8(a);
   while (start <= s - 32) {
@@ -248,6 +149,8 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 
         while (mask != 0) {
             const int bitpos = __builtin_ctzll(mask);
+            if (i + bitpos >= n)
+                return 0;
             if (memcmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
                 return s + i + bitpos;
             }
@@ -263,15 +166,29 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 #include <arm_neon.h>
 
 int64_t countbyte(const char *s, const char *end, uint8_t c) {
-    uint8x16_t needle = vdupq_n_u8(c);
+    // uint8x16_t needle = vdupq_n_u8(c);
+    asm volatile("dup.16b v9, %w0\n" : : "r"(c) : "memory");
     int64_t count = 0;
+    uint32_t temp;
 
     while (end - s >= 16) {
-        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-        uint8x16_t res = vceqq_u8(haystack, needle);
-        uint8x8_t r = vshrn_n_u16(res, 4);
-        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
-        count += __builtin_popcountll(matches);
+        asm volatile(
+                "ld1 { v0.16b }, [%2]\n"
+                "cmeq.16b  v0, v0, v9\n"
+                "shrn.8b   v0, v0, #0x4\n"
+                "cnt.8b    v0, v0\n"
+                "uaddlv.8b h1, v0\n"
+                "fmov      %w1, s1\n"
+                "add       %0, %3, %x1\n"
+                : "=r"(count), "=r"(temp)
+                : "r"(s), "r"(count)
+                : "memory");
+    //     uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+    //     uint8x16_t res = vceqq_u8(haystack, needle);
+    //     uint8x8_t r = vshrn_n_u16(res, 4);
+    //     uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
+    //     count += __builtin_popcountll(matches);
+        // count += (int64_t)temp;
         s += 16;
     }
     count /= 4;
@@ -283,121 +200,85 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
     return count;
 }
 
-static const char *strstr_safebound(const char *s, const char *end, const char* needle, size_t k) {
-    uint8x16_t first = vdupq_n_u8(needle[0]), last  = vdupq_n_u8(needle[k - 1]);
+const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
+{
+    asm volatile(
+            "dup.16b v7, %w0\n"
+            "dup.16b v8, %w1\n"
+            :
+            : "r"(needle[0]), "r"(needle[k - 1])
+            : "memory");
 
-    while (s <= end - k) {
-        const uint8x16_t block_first = vld1q_u8((const uint8_t *)s);
-        const uint8x16_t block_last  = vld1q_u8((const uint8_t *)s + k - 1);
+    for (size_t i = 0; i < n; i += 16) {
+        uint64_t mask;
+        
+        asm volatile(
+                "ld1 { v0.16b }, [%1]\n" // v0 = first block
+                "ld1 { v1.16b }, [%2]\n" // v1 = last block
+                "cmeq.16b v0, v0, v7\n"
+                "cmeq.16b v1, v1, v8\n"
+                "and.16b  v0, v0, v1\n"
+                "shrn.8b  v0, v0, #0x4\n"
+                "umov %0, v0.d[0]\n"
+                : "=r"(mask)
+                : "r"(s + i), "r"(s + i + k - 1)
+                : "memory");
 
-        const uint8x16_t eq_first = vceqq_u8(first, block_first);
-        const uint8x16_t eq_last  = vceqq_u8(last, block_last);
-        uint8x8_t r = vshrn_n_u16(vandq_u8(eq_first, eq_last), 4);
-        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
-        while (matches) {
-            size_t i = __builtin_ctzll(matches);
-            matches = i == 60 ? 0 : matches >> (i + 4);
-            s += i / 4 + 1;
-            if (s >= end - k) {
+        while (mask != 0) {
+            int bitpos = __builtin_ctzll(mask);
+            mask &= ~(0xFLLU << bitpos);
+            bitpos /= 4;
+            if (i + bitpos >= n)
                 return 0;
-            }
-            if (memcmp(s, needle + 1, k - 2) == 0) {
-                return s - 1;
+            if (memcmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
+                return s + i + bitpos;
             }
         }
-        s += 16;
     }
 
-    return NULL;
-}
-
-const char *index4bytes(const char *s, const char *end, uint32_t v4, uint32_t mask4) {
-    uint16_t b = v4 >> 16, a = v4;
-    uint16x8_t needle = vdupq_n_u16((a & 0x0F0F) | ((b & 0x0F0F) << 4));
-    uint8x16_t teeth = vdupq_n_u8(0x0F), one = vdupq_n_u8(0xFF);
-    uint8x16_t shuffle1 = {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8};
-    uint8x16_t shuffle2 = {2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10};
-    // printf("%b\n", v4);
-
-    while (s <= end - 16) {
-        uint8x16_t p = vandq_u8(vld1q_u8((const uint8_t *)s), teeth);
-
-        uint8x16_t haystack1 = vqtbl1q_u8(p, shuffle1);
-        uint8x16_t haystack2 = vqtbl1q_u8(p, shuffle2);
-        // for (int i = 0; i < 8; i++) printf("%04x ", *((uint16_t *)&haystack1 +
-        // i)); printf("\n"); for (int i = 0; i < 4; i++) printf("%04x ",
-        // *((uint16_t *)&res1 + i)); printf("\n");
-
-        uint16x8_t res = vreinterpretq_u16_u8(vsliq_n_u8(haystack1, haystack2, 4));
-        uint16x8_t mask = vceqq_u16(res, needle);
-        uint8x8_t r = vshrn_n_u16(mask, 4);
-        uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
-        if (matches) {
-            int i = __builtin_ctzll(matches);
-            return s + i / 8;
-        }
-        s += 8;
-    }
-
-    while (s < end - 3) {
-        if ((*(uint32_t *)s & mask4) == (v4 & mask4))
-            return s;
-        s++;
-    }
     return 0;
 }
 
-const char *index2bytes(const char *s, const char *end, uint16_t v,
-                        uint8_t mask, uint16_t mask2) {
-  uint16x8_t needle = vdupq_n_u16(v);
-  uint8x16_t casemask = vdupq_n_u8(mask);
+const char *strstr_case(const char* s, const size_t n, const char* needle, const size_t k)
+{
+    asm volatile(
+            "dup.16b v7, %w0\n"
+            "dup.16b v8, %w1\n"
+            "movi.16b v9, #0xDF\n"
+            :
+            : "r"(needle[0] & 0xDF), "r"(needle[k - 1] & 0xDF)
+            : "memory");
 
-  while (s <= end - 16) {
-    uint8x16_t haystack1 = vld1q_u8((const uint8_t *)s);
-    uint8x16_t haystack2 = vextq_u8(haystack1, haystack1, 1);
-    uint8x16_t zipped = vzipq_u8(haystack1, haystack2).val[0];
-    zipped = vandq_u8(zipped, casemask);
-    uint16x8_t interleaved = vreinterpretq_u16_u8(zipped);
-    uint16x8_t mask = vceqq_u16(interleaved, needle);
-    uint8x8_t res = vshrn_n_u16(mask, 1);
-    uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(res), 0);
-    if (matches > 0) {
-      int one = __builtin_ctzll(matches) / 8;
-      return s + one;
+    for (size_t i = 0; i < n; i += 16) {
+        uint64_t mask;
+        
+        asm volatile(
+                "ld1 { v0.16b }, [%1]\n" // v0 = first block
+                "ld1 { v1.16b }, [%2]\n" // v1 = last block
+                "and.16b  v0, v0, v9\n"
+                "cmeq.16b v0, v0, v7\n"
+                "and.16b  v1, v1, v9\n"
+                "cmeq.16b v1, v1, v8\n"
+                "and.16b  v0, v0, v1\n"
+                "shrn.8b  v0, v0, #0x4\n"
+                "umov %0, v0.d[0]\n"
+                : "=r"(mask)
+                : "r"(s + i), "r"(s + i + k - 1)
+                : "memory");
+
+        while (mask != 0) {
+            int bitpos = __builtin_ctzll(mask);
+            mask &= ~(0xFLLU << bitpos);
+            bitpos /= 4;
+            if (i + bitpos >= n)
+                return 0;
+            if (strncasecmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
+                return s + i + bitpos;
+            }
+        }
     }
-    s += 8;
-  }
 
-  while (s < end - 1) {
-    if ((*(uint16_t *)s & mask2) == v)
-      return s;
-    s++;
-  }
-  return 0;
-}
-
-const char *indexcasebyte(const char *s, const char *end, const uint8_t lo,
-                          const uint8_t up) {
-  uint16x8_t needle = vdupq_n_u16((uint16_t)lo << 8 | (uint16_t)up);
-  while (s <= end - 8) {
-    uint8x16_t haystack1 =
-        vcombine_u8(vmov_n_u64(*(const uint64_t *)(s)), vdup_n_u8(0));
-    uint8x16_t interleaved = vzipq_u8(haystack1, haystack1).val[0];
-    uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(interleaved, needle));
-    uint8x8_t res = vshrn_n_u16(mask, 4);
-    uint64_t matches = vreinterpret_u64_u8(res);
-    if (matches > 0) {
-      int one = __builtin_ctzll(matches) >> 2;
-      return s + one / 2;
-    }
-    s += 8;
-  }
-
-  for (; s < end; s++) {
-    if (*s == lo || *s == up)
-      return s;
-  }
-  return 0;
+    return 0;
 }
 
 const char *indexbyte(const char *s, const char *end, const uint8_t a) {
@@ -499,44 +380,6 @@ void grepper_free(struct grepper *g) {
     free(g->rx.error);
 }
 
-static const char *indexcasestr_long4(struct grepper *g, const char *s, const char *end) {
-    int64_t lf = g->len;
-    uint32_t v = *(uint32_t *)(g->find + lf - 4);
-    while (s <= end - lf) {
-        s = index4bytes(s + lf - 4, end, v, g->_case_mask32);
-        if (!s)
-            return s;
-        s -= lf - 4;
-        int j = lf - 1;
-        while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
-            --j;
-        if (j < 0)
-            return s;
-        s += MAX(1, j - g->_table[(uint8_t)s[j]]);
-    }
-    return 0;
-}
-
-static const char *indexcasestr_long(struct grepper *g, const char *s,
-                                     const char *end) {
-  int64_t lf = g->len;
-  uint16_t v = *(uint16_t *)(g->find + lf - 2) & g->_case_mask16;
-  while (s <= end - lf) {
-    const char *s0 = s;
-    s = index2bytes(s + lf - 2, end, v, g->_case_mask8, g->_case_mask16);
-    if (!s)
-      return s;
-    s -= lf - 2;
-    int j = lf - 1;
-    while (j >= 0 && (s[j] == g->findlower[j] || s[j] == g->findupper[j]))
-      --j;
-    if (j < 0)
-      return s;
-    s += MAX(1, j - g->_table[(uint8_t)s[j]]);
-  }
-  return 0;
-}
-
 static const char *indexcasestr(struct grepper *g, const char *s, const char *end) {
     if (s + g->len > end)
         return 0;
@@ -547,17 +390,9 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
         return strncmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
-    if (g->len == 1) {
-        return g->ignore_case
-            ? indexcasebyte(s, end, tolower(*g->find), toupper(*g->find))
-            : indexbyte(s, end, *g->find);
-    }
-
-    if (g->len >= 4)
-        return strstr_x(s, end - s, g->find, g->len);
-        // return indexcasestr_long4(g, s, end);
-
-    return indexcasestr_long(g, s, end);
+    return g->ignore_case ?
+        strstr_case(s, end - s, g->find, g->len) :
+        strstr_x(s, end - s, g->find, g->len);
 }
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
@@ -652,7 +487,7 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
         return errno;
     }
 
-    part->is_binary = file->is_binary = indexbyte(part->buf, part->buf + part->data_size, 0);
+    part->is_binary = file->is_binary = indexbyte(part->buf, part->buf + MIN(1024, part->data_size), 0);
     if (file->is_binary) {
         switch (g->binary_mode) {
             case BINARY_IGNORE:
