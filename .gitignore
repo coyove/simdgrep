@@ -8,3 +8,4 @@ simdgrep
 test*.txt
 *.dSYM
 *.o
+perf*
