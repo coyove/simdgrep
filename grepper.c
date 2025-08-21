@@ -376,8 +376,6 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a) {
 
 const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 {
-    assert(k > 0);
-    assert(n > 0);
     const __m256i first = _mm256_set1_epi8(needle[0]);
     const __m256i last  = _mm256_set1_epi8(needle[k - 1]);
     for (size_t i = 0; i < n; i += 64) {
@@ -411,36 +409,28 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, size_t n, const char* needle, size_t k)
+const char *strstr_case(const char* s, size_t n, const char* lo, const char *up, size_t k)
 {
-    const __m256i first = _mm256_set1_epi8(needle[0]);
-    const __m256i last  = _mm256_set1_epi8(needle[k - 1]);
-    const __m256i teeth = _mm256_set1_epi8(0xDF);
-    for (size_t i = 0; i < n; i += 64) {
+    const __m256i firstlo = _mm256_set1_epi8(lo[0]), lastlo = _mm256_set1_epi8(lo[k - 1]);
+    const __m256i firstup = _mm256_set1_epi8(up[0]), lastup = _mm256_set1_epi8(up[k - 1]);
+
+    for (size_t i = 0; i < n; i += 32) {
         const __m256i block_first1 = _mm256_loadu_si256((const __m256i*)(s + i));
         const __m256i block_last1  = _mm256_loadu_si256((const __m256i*)(s + i + k - 1));
 
-        const __m256i block_first2 = _mm256_loadu_si256((const __m256i*)(s + i + 32));
-        const __m256i block_last2  = _mm256_loadu_si256((const __m256i*)(s + i + k - 1 + 32));
+        const __m256i eq_first1 = _mm256_or_si256(_mm256_cmpeq_epi8(firstlo, block_first1), _mm256_cmpeq_epi8(firstup, block_first1));
+        const __m256i eq_last1 = _mm256_or_si256(_mm256_cmpeq_epi8(lastlo, block_last1), _mm256_cmpeq_epi8(lastup, block_last1));
 
-        const __m256i eq_first1 = _mm256_cmpeq_epi8(first, _mm256_and_si256(teeth, block_first1));
-        const __m256i eq_last1  = _mm256_cmpeq_epi8(last, _mm256_and_si256(teeth, block_last1));
-
-        const __m256i eq_first2 = _mm256_cmpeq_epi8(first, _mm256_and_si256(teeth, block_first2));
-        const __m256i eq_last2  = _mm256_cmpeq_epi8(last, _mm256_and_si256(teeth, block_last2));
-
-        const uint32_t mask1 = _mm256_movemask_epi8(_mm256_and_si256(eq_first1, eq_last1));
-        const uint32_t mask2 = _mm256_movemask_epi8(_mm256_and_si256(eq_first2, eq_last2));
-        uint64_t mask = mask1 | ((uint64_t)mask2 << 32);
+        uint64_t mask = (uint32_t)_mm256_movemask_epi8(_mm256_and_si256(eq_first1, eq_last1));
 
         while (mask != 0) {
             const int bitpos = __builtin_ctzll(mask);
+            mask &= ~(1LLU << bitpos);
             if (i + bitpos >= n)
                 return 0;
-            if (strncasecmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
+            if (strncasecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
                 return s + i + bitpos;
             }
-            mask = bitpos == 63 ? 0 : (mask >> (bitpos + 1) << (bitpos + 1));
         }
     }
 
@@ -554,7 +544,7 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, const size_t n, const char *lo, const char *up, const size_t k)
+const char *strstr_case(const char* s, size_t n, const char *lo, const char *up, size_t k)
 {
     asm volatile(
             "dup.16b v6, %w0\n"
