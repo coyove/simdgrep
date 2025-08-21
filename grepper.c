@@ -326,9 +326,6 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c) {
         count += __builtin_popcountll(_mm256_movemask_epi8(res));
         s += 32;
     }
-    // __m256i haystack = _mm256_loadu_si256((__m256i *)s);
-    // __m256i res = _mm256_cmpeq_epi8(haystack, needle);
-    // count += __builtin_popcountll(_mm256_movemask_epi8(res) << (s + 32 - end));
     while (s < end) {
         if (*s++ == c)
             count++;
@@ -428,7 +425,7 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
             mask &= ~(1LLU << bitpos);
             if (i + bitpos >= n)
                 return 0;
-            if (strncasecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
+            if (utf8casecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
                 return s + i + bitpos;
             }
         }
@@ -674,7 +671,6 @@ int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
         // printf("%.*s\n", g->len, g->findlower);
     }
 
-    g->falses = 0;
     g->next_g = 0;
     return INIT_OK;
 }

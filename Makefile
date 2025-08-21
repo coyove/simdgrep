@@ -12,10 +12,10 @@ test_stack: test/test_stack.c stack.c
 	$(CC) -O3 test/test_stack.c stack.c
 
 sg: ${OBJS}
-	$(CC) -O3 -g -o simdgrep $^
+	$(CC) -O3 -o simdgrep $^
 
 %.o: %.c
-	$(CC) $(CFLAGS) -g -c $< -o $@
+	$(CC) $(CFLAGS) -O3 -g -c $< -o $@
 
 clean:
 	rm -f $(OBJS) $(TARGET)

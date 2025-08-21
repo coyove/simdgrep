@@ -270,9 +270,9 @@ bool is_repo_bin(const char *dir, const char *name)
     return false;
 }
 
-bool is_dir(const char *name)
+bool is_dir(const char *name, bool follow_link)
 {
     struct stat ss;
-    lstat(name, &ss); 
+    follow_link ? stat(name, &ss) : lstat(name, &ss); 
     return S_ISDIR(ss.st_mode);
 }
