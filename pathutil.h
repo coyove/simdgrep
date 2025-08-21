@@ -36,6 +36,6 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
 
 bool is_repo_bin(const char *dir, const char *name);
 
-bool is_dir(const char *name);
+bool is_dir(const char *name, bool follow_link);
 
 #endif
