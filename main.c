@@ -29,7 +29,6 @@ static struct _flags {
     int xbytes;
     int verbose;
     int64_t line_size;
-    int64_t mmap_limit;
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
@@ -285,8 +284,6 @@ void usage()
     printf("\t-C N\tcombine (-A N) and (-B N)\n");
     printf("\t-M N\tsplit lines longer than N kilobytes (default: 64K), thus\n");
     printf("\t\tmatches may be incomplete at split points\n");
-    printf("\t-m N\tmemory map files larger than N megabytes (default: 64M)\n");
-    printf("\t\t0 means disable memory map\n");
     printf("\t-j N\tspawn N threads for searching\n");
     abort();
 }
@@ -304,11 +301,6 @@ int main(int argc, char **argv)
     flags.quiet = 0;
     flags.xbytes = 1e8;
     flags.line_size = 64 << 10;
-#ifdef __APPLE__
-    flags.mmap_limit = 0; // disable mmap
-#else
-    flags.mmap_limit = 64 << 20; // 64MB
-#endif
     flags.verbose = 7;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));
@@ -335,7 +327,6 @@ int main(int argc, char **argv)
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
         case 'M': flags.line_size = MAX(1, atoi(optarg)) << 10; break;
-        case 'm': flags.mmap_limit = MAX(0, atoi(optarg)) << 20; break;
         case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
@@ -360,7 +351,7 @@ int main(int argc, char **argv)
         goto EXIT;
     
     LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
-    LOG("* line size: %lldK, mmap limit: %lldM\n", flags.line_size >> 10, flags.mmap_limit >> 20);
+    LOG("* line size: %lldK\n", flags.line_size >> 10);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
@@ -368,11 +359,18 @@ int main(int argc, char **argv)
     LOG("* line context %d bytes\n", flags.xbytes);
 
     if (flags.fixed_string) {
-        const char *uc = unsafecasestr(expr);
-        grepper_init(&g, expr, flags.ignore_case && uc == NULL);
-        if (flags.ignore_case && uc)
-            WARN("can't ignore case of '%s' due to special chars, conduct exact searching\n", uc);
-    } else {
+        int c = grepper_init(&g, expr, flags.ignore_case);
+        if (c == INIT_INVALID_UTF8) {
+            ERR0("invalid UTF8 string to search")
+            goto EXIT;
+        }
+        if (c == INIT_OK) {
+        } else if (flags.ignore_case) {
+            WARN("special char case (0x%04x), conduct regex searching\n", c);
+            flags.fixed_string = false;
+        }
+    }
+    if (!flags.fixed_string) {
         grepper_init_rx(&g, expr, flags.ignore_case);
         if (g.rx.error) {
             ERR0("invalid expression: %s", g.rx.error);
