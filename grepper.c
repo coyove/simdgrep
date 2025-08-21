@@ -2,6 +2,13 @@
 
 #include "STC/include/stc/csview.h"
 
+#define i_import
+#include "STC/include/stc/cregex.h"
+#include "STC/include/stc/utf8.h"
+
+#define RX_SOL 0x80000000
+#define RX_EOL 0x40000000
+
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,6 +73,242 @@ static int utf8casecmp(const char *a, const char *b, size_t n)
     csview av = csview_from_n(a, n);
     csview bv = csview_from_n(b, n);
     return csview_icmp(&av, &bv);
+}
+
+int torune(uint32_t *rune, const char *s)
+{
+    return chartorune(rune, s);
+}
+
+static bool safecase(uint32_t r)
+{
+    char tmp[4];
+    int lo = utf8_tolower(r), hi = utf8_toupper(r);
+    return utf8_encode(tmp, lo) == utf8_encode(tmp, hi);
+}
+
+static int _rx_skip_bracket(const char *s, int i)
+{
+    int depth = 1;
+    for (++i; depth; ++i) {
+        char c = *(s + i);
+        if (!c)
+            return i;
+        if (c != '[' && c != ']')
+            continue;
+        if (*(s + i - 1) == '\\')
+            continue;
+        if (c == '[')
+            depth++;
+        if (c == ']')
+            depth--;
+    }
+    return i;
+}
+
+static int _rx_skip_paren(const char *s, int i)
+{
+    int depth = 1;
+    for (++i; depth; ++i) {
+        char c = *(s + i);
+        if (!c)
+            return i;
+        if (c != '(' && c != ')' && c != '[')
+            continue;
+        if (*(s + i - 1) == '\\')
+            continue;
+        if (c == '[')
+            i = _rx_skip_bracket(s, i) - 1; // ++i
+        if (c == '(')
+            depth++;
+        if (c == ')')
+            depth--;
+    }
+    return i;
+}
+
+void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
+{
+    int i = 0, j = 0, sl = strlen(s);
+    char *pp = (char *)malloc(sl + 1);
+    memset(pp, 0, sl + 1);
+
+    for (bool lit = false; i < sl; i++) {
+        if (lit) {
+            if (s[i] != '\\' || i + 1 >= sl || s[i + 1] != 'E') {
+                pp[j++] = s[i];
+                continue;
+            }
+        }
+        switch (s[i]) {
+        case '|':
+            g->rx.use_regex++;
+            j = 0;
+            goto INIT;
+        case '\\':
+            if (++i >= sl)
+                goto UNSUPPORTED;
+            switch (s[i]) {
+            case 'Q': lit = true; break;
+            case 'E': lit = false; break;
+            case 'x':
+                if (i + 3 >= sl || s[i + 1] != '{')
+                    goto UNSUPPORTED;
+                char *rend;
+                i += 2;
+                int r = strtol(s + i, &rend, 16);
+                if (*rend != '}' || r < 0 || r > 0x10FFFF)
+                    goto UNSUPPORTED;
+                i = rend - s;
+                if (ignore_case && !safecase(r)) {
+                    g->rx.use_regex++;
+                    pp[j++] = 0;
+                } else {
+                    j += utf8_encode(pp + j, r);
+                }
+                break;
+            case 'r': pp[j++] = '\r'; break;
+            case 't': pp[j++] = '\t'; break;
+            case 'v': pp[j++] = '\v'; break;
+            case 'f': pp[j++] = '\f'; break;
+            case 'a': pp[j++] = '\a'; break;
+            case 's': case 'S': case 'w': case 'W': case 'd': case 'D':
+            case 'b': case 'B': case 'A': case 'z': case 'Z': case 'p': 
+            case 'P':
+                g->rx.use_regex++;
+                pp[j++] = 0;
+                break;
+            default:
+                pp[j++] = s[i];
+            }
+            break;
+        case '.':
+            pp[j++] = 0;
+            g->rx.use_regex++;
+            break;
+        case '^':
+            g->rx.use_regex |= RX_SOL;
+            break;
+        case '$':
+            g->rx.use_regex |= RX_EOL;
+            break;
+        case '+': 
+            g->rx.use_regex++;
+            break;
+        case '(':
+            g->rx.use_regex++;
+            pp[j++] = 0;
+            i = _rx_skip_paren(s, i) - 1; // ++i
+            break;
+        case '{':
+            g->rx.use_regex++;
+            for (++i; s[i] && s[i] != '}'; ++i);
+            // fallthrough
+        case '*': case '?': 
+            g->rx.use_regex++;
+            for (j--; j && ((uint8_t)pp[j] >> 6) == 2; j--);
+            if (j < 0)
+                goto UNSUPPORTED;
+            if (j)
+                pp[j++] = 0;
+            break;
+        case '[':
+            g->rx.use_regex++;
+            pp[j++] = 0;
+            i = _rx_skip_bracket(s, i) - 1; // ++i
+            break;
+        default:
+            if (ignore_case) {
+                uint32_t r;
+                int n = torune(&r, s + i);
+                memcpy(pp + j, s + i, n);
+                i += n - 1;
+                if (!safecase(r)) {
+                    g->rx.use_regex++;
+                    pp[j++] = 0;
+                    break;
+                }
+                j += n;
+            } else {
+                pp[j++] = s[i];
+            }
+            if (!g->rx.use_regex)
+                g->rx.fixed_start = true;
+        }
+    }
+
+INIT:
+    if (g->rx.use_regex == RX_SOL) {
+        // ^abc
+        g->rx.use_regex = 0;
+        g->rx.line_start = true;
+    } else if (g->rx.use_regex == RX_EOL) {
+        // abc$
+        g->rx.use_regex = 0;
+        g->rx.line_end = true;
+    } else if (g->rx.use_regex == RX_SOL + RX_EOL) {
+        // ^abc$
+        g->rx.use_regex = 0;
+        g->rx.line_start = g->rx.line_end = true;
+    } else if (g->rx.use_regex) {
+        g->rx.engine = cregex_make(s, ignore_case ? CREG_ICASE : 0);
+        if (g->rx.engine.error != CREG_OK) {
+            g->rx.use_regex = 0;
+            g->rx.error = (char *)malloc(256);
+            snprintf(g->rx.error, 256, "regexp error (%d)", g->rx.engine.error);
+        } else {
+            g->rx.groups = cregex_captures(&g->rx.engine) + 1;
+        }
+    }
+
+    for (int i = 0 ; i < j; ) {
+        int ln = strlen(pp + i);
+        if (ln) {
+            if (!g->find) {
+                grepper_init(g, pp + i, ignore_case);
+            } else {
+                grepper_add(g, pp + i);
+            }
+        }
+        i += ln + 1;
+    }
+    if (!g->find) {
+        grepper_init(g, "<SLOWRX>", false);
+        g->slow_rx = true;
+    }
+
+    free(pp);
+    return;
+
+UNSUPPORTED:
+    free(pp);
+    g->rx.error = (char *)malloc(256);
+    snprintf(g->rx.error, 256, "invalid escape at '%s'", s + i - 1);
+}
+
+bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
+        const char *line_start, const char *s, const char *line_end)
+{
+    if (g->rx.use_regex) {
+        const char *rx_start = g->rx.fixed_start ? s : line_start;
+        char end_ch = *line_end;
+
+        *(char *)line_end = 0;
+        int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match, CREG_DEFAULT);
+        *(char *)line_end = end_ch;
+
+        if (rc != CREG_OK)
+            return false;
+
+        gl->match_start = rx_match[0].buf - line_start;
+        gl->match_end = gl->match_start + rx_match[0].size;
+        return true;
+    }
+    if (g->rx.line_start && s != line_start)
+        return false;
+    if (g->rx.line_end && s + g->len != line_end)
+        return false;
+    return true;
 }
 
 #if defined(__x86_64__)
@@ -209,37 +452,66 @@ const char *strstr_case(const char* s, size_t n, const char* needle, size_t k)
 #include <arm_neon.h>
 
 int64_t countbyte(const char *s, const char *end, uint8_t c) {
-    // uint8x16_t needle = vdupq_n_u8(c);
-    asm volatile("dup.16b v9, %w0\n" : : "r"(c) : "memory");
     int64_t count = 0;
     uint32_t temp = 0;
+// #define ASM
 
-    while (end - s >= 16) {
-        asm volatile(
-                "ld1 { v0.16b }, [%2]\n"
-                "cmeq.16b  v0, v0, v9\n"
-                "shrn.8b   v0, v0, #0x4\n"
-                "cnt.8b    v0, v0\n"
-                "uaddlv.8b h1, v0\n"
-                "fmov      %w1, s1\n"
-                "add       %0, %0, %x1\n"
-                : "+r"(count), "=r"(temp)
-                : "r"(s)
-                : "memory");
+#ifdef ASM
+    // uint8x16_t needle = vdupq_n_u8(c);
+    asm volatile("dup.16b v9, %w0\n" : : "r"(c) : "memory");
+    while (s < end) {
+#endif
+    asm volatile(
+#ifndef ASM
+            "dup.16b   v9, %w4\n"
+#endif
+
+            "1:\n"
+            "ld1 { v0.16b }, [%2]\n"
+            "cmeq.16b  v0, v0, v9\n"
+            "shrn.8b   v0, v0, #0x4\n"
+            "cnt.8b    v0, v0\n"
+            "uaddlv.8b h1, v0\n"
+            "fmov      %w1, s1\n"
+            "add       %0, %0, %x1\n"
+            "add       %2, %2, #0x10\n"
+#ifndef ASM
+            "cmp       %2, %3\n"
+            "b.lt      1b\n"         // s < end
+            "lsr       %0, %0, #0x2\n" // count /= 4
+
+            "2:\n"
+            "sub       %2, %2, #0x1\n"
+            "cmp       %2, %3\n"
+            "b.lt      3f\n"         // s < end
+            "ldrb      %w1, [%2]\n"
+            "cmp       %w1, %w4\n"   // *s == c
+            "cset      %x1, eq\n"   
+            "sub       %0, %0, %x1\n" // count--
+            "b         2b\n"
+
+            "3:\n"
+#endif
+            : "+r"(count), "=r"(temp), "+r"(s), "+r"(end), "+r"(c)
+            : 
+            : "memory");
     //     uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
     //     uint8x16_t res = vceqq_u8(haystack, needle);
     //     uint8x8_t r = vshrn_n_u16(res, 4);
     //     uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
     //     count += __builtin_popcountll(matches);
-        // count += (int64_t)temp;
+#ifdef ASM
         s += 16;
     }
     count /= 4;
 
-    while (s < end) {
-        if (*s++ == c)
-            count++;
+            // printf("overshot %lu %lu, %lu\n", n, (uintptr_t)s , (uintptr_t)end);
+    for (--s; s >= end; --s) {
+        if (*s == c) {
+            count--;
+        }
     }
+#endif
     return count;
 }
 
@@ -282,15 +554,14 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, const size_t n, const char* needle, const size_t k)
+const char *strstr_case(const char* s, const size_t n, const char *lo, const char *up, const size_t k)
 {
     asm volatile(
-            "dup.16b v7, %w0\n"
-            "dup.16b v8, %w1\n"
-            "movi.16b v9, #0xDF\n"
-            :
-            : "r"(needle[0] & 0xDF), "r"(needle[k - 1] & 0xDF)
-            : "memory");
+            "dup.16b v6, %w0\n"
+            "dup.16b v7, %w1\n"
+            "dup.16b v8, %w2\n"
+            "dup.16b v9, %w3\n"
+            : : "r"(lo[0]), "r"(up[0]), "r"(lo[k - 1]), "r"(up[k - 1]) : "memory");
 
     for (size_t i = 0; i < n; i += 16) {
         uint64_t mask;
@@ -298,10 +569,12 @@ const char *strstr_case(const char* s, const size_t n, const char* needle, const
         asm volatile(
                 "ld1 { v0.16b }, [%1]\n" // v0 = first block
                 "ld1 { v1.16b }, [%2]\n" // v1 = last block
-                "and.16b  v0, v0, v9\n"
+                "cmeq.16b v2, v0, v6\n"
                 "cmeq.16b v0, v0, v7\n"
-                "and.16b  v1, v1, v9\n"
-                "cmeq.16b v1, v1, v8\n"
+                "orr.16b  v0, v0, v2\n" // compare first block
+                "cmeq.16b v2, v1, v8\n"
+                "cmeq.16b v1, v1, v9\n"
+                "orr.16b  v1, v1, v2\n" // compare last block
                 "and.16b  v0, v0, v1\n"
                 "shrn.8b  v0, v0, #0x4\n"
                 "umov %0, v0.d[0]\n"
@@ -315,7 +588,7 @@ const char *strstr_case(const char* s, const size_t n, const char* needle, const
             bitpos /= 4;
             if (i + bitpos >= n)
                 return 0;
-            if (utf8casecmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
+            if (utf8casecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
                 return s + i + bitpos;
             }
         }
@@ -382,48 +655,50 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
 
 #endif
 
-void grepper_init(struct grepper *g, const char *find, bool ignore_case) {
-  g->ignore_case = ignore_case;
-  g->len = strlen(find);
-  g->find = (char *)malloc(g->len * 3 + 3);
-  g->findupper = g->find + g->len + 1;
-  g->findlower = g->findupper + g->len + 1;
-  memset(g->find, 0, g->len * 3 + 3);
-  memset(g->_table, -1, 256 * sizeof(int));
+int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
+    g->ignore_case = ignore_case;
+    g->len = strlen(find);
 
-  if (ignore_case) {
-    for (int i = 0, j = 0; i < g->len;) {
-      uint32_t r;
-      int n = torune(&r, find + i);
-      utf8_encode(g->findlower + j, utf8_tolower(r));
-      utf8_encode(g->findupper + j, utf8_toupper(r));
-      for (; n; n--, i++, j++) {
-        g->find[i] = find[i];
-        g->_table[(uint8_t)g->findlower[j]] = i;
-        g->_table[(uint8_t)g->findupper[j]] = i;
-      }
+    if (!ignore_case) {
+        g->find = strdup(find);
+    } else {
+        g->find = (char *)malloc(g->len * 3 + 12);
+        g->findupper = g->find + g->len + 4;
+        g->findlower = g->findupper + g->len + 4;
+        memcpy(g->find, find, g->len);
+        utf8_decode_t d = {.state=0};
+        for (size_t off = 0; off < g->len; ) {
+            uint32_t r;
+            int n = torune(&r, find + off);
+            if (r == 0xFFFD)
+                return INIT_INVALID_UTF8;
+            uint32_t up = utf8_toupper(r), lo = utf8_tolower(r);
+            int n1 = utf8_encode(g->findupper + off, up);
+            int n2 = utf8_encode(g->findlower + off, lo);
+            if (n1 != n2 || n1 != n) 
+                return r;
+            off += n;
+        }
+        // printf("%.*s\n", g->len, g->find);
+        // printf("%.*s\n", g->len, g->findupper);
+        // printf("%.*s\n", g->len, g->findlower);
     }
-  } else {
-    for (int i = 0; i < g->len; i++) {
-      g->find[i] = g->findupper[i] = g->findlower[i] = find[i];
-      g->_table[(uint8_t)find[i]] = i;
-    }
-  }
 
-  g->falses = 0;
-  g->next_g = 0;
+    g->falses = 0;
+    g->next_g = 0;
+    return INIT_OK;
 }
 
 struct grepper *grepper_add(struct grepper *g, const char *find) {
-  struct grepper *ng = (struct grepper *)malloc(sizeof(struct grepper));
-  memset(ng, 0, sizeof(struct grepper));
-  grepper_init(ng, find, g->ignore_case);
+    struct grepper *ng = (struct grepper *)malloc(sizeof(struct grepper));
+    memset(ng, 0, sizeof(struct grepper));
+    grepper_init(ng, find, g->ignore_case);
 
-  while (g->next_g)
-    g = g->next_g;
-  g->next_g = ng;
+    while (g->next_g)
+        g = g->next_g;
+    g->next_g = ng;
 
-  return ng;
+    return ng;
 }
 
 void grepper_free(struct grepper *g) {
@@ -444,11 +719,11 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
     if (s + g->len == end) {
         if (g->ignore_case)
             return utf8casecmp(s, g->find, g->len) == 0 ? s : 0;
-        return strncmp(s, g->find, g->len) == 0 ? s : 0;
+        return memcmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
     return g->ignore_case ?
-        strstr_case(s, end - s, g->find, g->len) :
+        strstr_case(s, end - s, g->findlower, g->findupper, g->len) :
         strstr_x(s, end - s, g->find, g->len);
 }
 
@@ -458,22 +733,30 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
     return found ? found - s : -1;
 }
 
+#ifdef __APPLE__
+#define FILE_LOCK() os_unfair_lock_lock(&file->lock)
+#define FILE_UNLOCK() os_unfair_lock_unlock(&file->lock)
+#else
+#define FILE_LOCK() pthread_mutex_lock(&file->lock)
+#define FILE_UNLOCK() pthread_mutex_unlock(&file->lock)
+#endif
+
 bool is_buffer_eof(struct grepfile *file, struct grepfile_chunk *part)
 {
     if (file->off >= file->size)
         return true;
-    pthread_mutex_lock(&file->lock);
+    FILE_LOCK();
     bool eof = file->off >= file->size;
-    pthread_mutex_unlock(&file->lock);
+    FILE_UNLOCK();
     return eof;
 }
 
 int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
 {
-    pthread_mutex_lock(&file->lock);
+    FILE_LOCK();
 
     if (file->off >= file->size) {
-        pthread_mutex_unlock(&file->lock);
+        FILE_UNLOCK();
         return FILL_EOF;
     }
 
@@ -490,7 +773,7 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
     if (n < 0) {
         // Only one caller will see the error (then process), others will get EOF.
         file->off = file->size;
-        pthread_mutex_unlock(&file->lock);
+        FILE_UNLOCK();
         return errno;
     }
     
@@ -510,7 +793,7 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
     }
     part->data_size = n;
     file->off += n;
-    pthread_mutex_unlock(&file->lock);
+    FILE_UNLOCK();
     return res;
 }
 
@@ -534,7 +817,11 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
     file->lines = 0;
     file->off = 0;
     file->is_binary_matching = 0;
+#ifdef __APPLE__
+    file->lock = OS_UNFAIR_LOCK_INIT;
+#else
     pthread_mutex_init(&file->lock, NULL);
+#endif
 
     int res = buffer_fill(file, part);
     if (res == FILL_LAST_CHUNK) {
@@ -560,7 +847,9 @@ int grepfile_release(struct grepfile *file)
 {
     if (file->fd)
         close(file->fd);
+#ifndef __APPLE__
     pthread_mutex_destroy(&file->lock); 
+#endif
     return 1;
 }
 
@@ -577,10 +866,7 @@ bool grepfile_process(struct grepper *g, struct grepfile_chunk *part)
 
     while (s < end) {
         if (g->slow_rx) {
-            char ch = *end;
-            *(char *)end = 0;
             int rc = cregex_match_sv(&g->rx.engine, csview_from_n(s, end - s), rx_match, CREG_DEFAULT);
-            *(char *)end = ch;
             s = rc != CREG_OK ? 0 : rx_match[0].buf;
         } else {
             s = indexcasestr(g, s, end);
