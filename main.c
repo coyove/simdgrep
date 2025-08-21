@@ -414,7 +414,7 @@ int main(int argc, char **argv)
         workers[i].actives = &actives;
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
         workers[i].chunk.buf_size = flags.line_size;
-        workers[i].chunk.buf = (char *)malloc(flags.line_size + 33);
+        workers[i].chunk.buf = (char *)malloc(flags.line_size + 65);
         pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
