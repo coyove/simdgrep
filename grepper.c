@@ -61,6 +61,13 @@ std::ostream &operator<<(std::ostream &out, const uint8x8_t &v) {
 #endif
 #endif
 
+static int utf8casecmp(const char *a, const char *b, size_t n)
+{
+    csview av = csview_from_n(a, n);
+    csview bv = csview_from_n(b, n);
+    return csview_icmp(&av, &bv);
+}
+
 #if defined(__x86_64__)
 
 #include <emmintrin.h>
@@ -169,7 +176,7 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
     // uint8x16_t needle = vdupq_n_u8(c);
     asm volatile("dup.16b v9, %w0\n" : : "r"(c) : "memory");
     int64_t count = 0;
-    uint32_t temp;
+    uint32_t temp = 0;
 
     while (end - s >= 16) {
         asm volatile(
@@ -179,9 +186,9 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
                 "cnt.8b    v0, v0\n"
                 "uaddlv.8b h1, v0\n"
                 "fmov      %w1, s1\n"
-                "add       %0, %3, %x1\n"
-                : "=r"(count), "=r"(temp)
-                : "r"(s), "r"(count)
+                "add       %0, %0, %x1\n"
+                : "+r"(count), "=r"(temp)
+                : "r"(s)
                 : "memory");
     //     uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
     //     uint8x16_t res = vceqq_u8(haystack, needle);
@@ -272,7 +279,7 @@ const char *strstr_case(const char* s, const size_t n, const char* needle, const
             bitpos /= 4;
             if (i + bitpos >= n)
                 return 0;
-            if (strncasecmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
+            if (utf8casecmp(s + i + bitpos + 1, needle + 1, k - 2) == 0) {
                 return s + i + bitpos;
             }
         }
@@ -282,42 +289,59 @@ const char *strstr_case(const char* s, const size_t n, const char* needle, const
 }
 
 const char *indexbyte(const char *s, const char *end, const uint8_t a) {
-  uint8x16_t needle = vdupq_n_u8(a);
-  while (s <= end - 16) {
-    uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-    uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-    uint8x8_t res = vshrn_n_u16(mask, 4);
-    uint64_t m = vreinterpret_u64_u8(res);
-    if (m > 0)
-      return s + __builtin_ctzll(m) / 4;
-    s += 16;
-  }
+    // uint8x16_t needle = vdupq_n_u8(a);
+    asm volatile("dup.16b v9, %w0\n" : : "r"(a) : "memory");
+    uint64_t m = 0;
 
-  for (; s < end; s++) {
-    if (*s == a)
-      return s;
-  }
-  return 0;
+    while (s <= end - 16) {
+        // uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        // uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
+        // uint8x8_t res = vshrn_n_u16(mask, 4);
+        // uint64_t m = vreinterpret_u64_u8(res);
+        asm volatile(
+                "ld1 { v0.16b }, [%1]\n"
+                "cmeq.16b v0, v0, v9\n"
+                "shrn.8b  v0, v0, #0x4\n"
+                "umov %0, v0.d[0]\n"
+                : "=r"(m) : "r"(s) : "memory");
+        if (m > 0)
+            return s + __builtin_ctzll(m) / 4;
+        s += 16;
+    }
+
+    for (; s < end; s++) {
+        if (*s == a)
+            return s;
+    }
+    return 0;
 }
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
-  uint8x16_t needle = vdupq_n_u8(a);
-  while (start <= s - 16) {
-    s -= 16;
-    uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-    uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-    uint8x8_t res = vshrn_n_u16(mask, 4);
-    uint64_t m = vreinterpret_u64_u8(res);
-    if (m > 0) {
-      return s + 15 - __builtin_clzll(m) / 4;
-    }
-  }
+    // uint8x16_t needle = vdupq_n_u8(a);
+    asm volatile("dup.16b v9, %w0\n" : : "r"(a) : "memory");
+    uint64_t m = 0;
 
-  for (s--; s >= start; s--) {
-    if (*s == a)
-      return s;
-  }
-  return 0;
+    while (start <= s - 16) {
+        s -= 16;
+        // uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        // uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
+        // uint8x8_t res = vshrn_n_u16(mask, 4);
+        // uint64_t m = vreinterpret_u64_u8(res);
+        asm volatile(
+                "ld1 { v0.16b }, [%1]\n"
+                "cmeq.16b v0, v0, v9\n"
+                "shrn.8b  v0, v0, #0x4\n"
+                "umov %0, v0.d[0]\n"
+                : "=r"(m) : "r"(s) : "memory");
+        if (m > 0)
+            return s + 15 - __builtin_clzll(m) / 4;
+    }
+
+    for (s--; s >= start; s--) {
+        if (*s == a)
+            return s;
+    }
+    return 0;
 }
 
 #endif
@@ -352,9 +376,6 @@ void grepper_init(struct grepper *g, const char *find, bool ignore_case) {
 
   g->falses = 0;
   g->next_g = 0;
-  g->_case_mask8 = ignore_case ? 0xDF : 0xFF;
-  g->_case_mask16 = ignore_case ? 0xDFDF : 0xFFFF;
-  g->_case_mask32 = ignore_case ? 0xDFDFDFDF : 0xFFFFFFFF;
 }
 
 struct grepper *grepper_add(struct grepper *g, const char *find) {
@@ -386,7 +407,7 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
 
     if (s + g->len == end) {
         if (g->ignore_case)
-            return strncasecmp(s, g->find, g->len) == 0 ? s : 0;
+            return utf8casecmp(s, g->find, g->len) == 0 ? s : 0;
         return strncmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
