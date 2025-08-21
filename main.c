@@ -56,6 +56,7 @@ void push_task(struct task *t)
 void new_task(char *name, struct matcher *m, bool is_dir)
 {
     struct task *t = (struct task *)malloc(sizeof(struct task));
+    t->node.next = 0;
     t->name = name;
     t->m = m;
     t->is_dir = is_dir;
@@ -117,9 +118,15 @@ NEXT:
             memcpy(n, t->name, ln);
             memcpy(n + ln, "/", 1);
             memcpy(n + ln + 1, dname, strlen(dname) + 1);
-            new_task(n, root,
-                        dirent->d_type == DT_UNKNOWN ? is_dir(n) :
-                        dirent->d_type == DT_DIR);
+            bool dir = false;
+            if (dirent->d_type == DT_LNK) {
+                dir = is_dir(n, true);
+            } else if (dirent->d_type == DT_UNKNOWN) {
+                dir = is_dir(n, false);
+            } else {
+                dir = dirent->d_type == DT_DIR;
+            }
+            new_task(n, root, dir);
         }
         closedir(dir);
     } else if (t->is_grepping) {
@@ -402,7 +409,7 @@ int main(int argc, char **argv)
             abort();
         }
         LOG("* search %s\n", joined);
-        new_task(joined, &flags.default_matcher, is_dir(joined));
+        new_task(joined, &flags.default_matcher, is_dir(joined, true));
     }
     if (tasks.count == 0) {
         new_task(strdup(flags.cwd), &flags.default_matcher, true);
@@ -431,7 +438,6 @@ int main(int argc, char **argv)
     } else {
         LOG("* respected %d .gitignore, %lld files ignored\n", num_ignorefiles, flags.ignores);
     }
-    LOG("%lld falses\n", g.falses);
 
 EXIT:
     grepper_free(&g);

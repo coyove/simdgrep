@@ -89,7 +89,6 @@ struct grepper {
     int before_lines;
     int after_lines;
     size_t len;
-    uint64_t _Atomic falses;
     bool (*callback)(const struct grepline *);
 
     struct rx_pattern_info rx;
