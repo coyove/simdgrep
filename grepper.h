@@ -15,6 +15,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <os/lock.h>
+#endif
+
 #include "STC/include/stc/cregex.h"
 
 #if defined(__x86_64__)
@@ -32,12 +36,6 @@
 static int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
 static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 
-#ifdef __MAX_BRUTE_FORCE_LENGTH
-static const int MAX_BRUTE_FORCE_LENGTH = __MAX_BRUTE_FORCE_LENGTH;
-#else
-static const int MAX_BRUTE_FORCE_LENGTH = 0;
-#endif
-
 #define BINARY 0
 #define BINARY_TEXT 1
 #define BINARY_IGNORE 2
@@ -47,6 +45,9 @@ static const int MAX_BRUTE_FORCE_LENGTH = 0;
 #define FILL_EMPTY -2
 #define FILL_LAST_CHUNK -8
 #define FILL_EOF -9
+
+#define INIT_OK 0
+#define INIT_INVALID_UTF8 -2
 
 static int64_t now() {
     struct timespec start;
@@ -64,7 +65,7 @@ struct rx_pattern_info {
     char *error;
 };
 
-struct grefile;
+struct grepfile;
 
 struct grepline {
     struct grepper *g;
@@ -85,13 +86,12 @@ struct grepper {
     bool slow_rx;
     bool search_name;
     int binary_mode;
-    int len;
     int before_lines;
     int after_lines;
+    size_t len;
     uint64_t _Atomic falses;
     bool (*callback)(const struct grepline *);
 
-    int _table[256];
     struct rx_pattern_info rx;
     struct grepper *next_g;
 };
@@ -104,7 +104,11 @@ struct grepfile {
     bool is_binary_matching;
     bool is_binary;
     int64_t lines;
+#ifdef __APPLE__
+    os_unfair_lock lock;
+#else
     pthread_mutex_t lock;
+#endif
 };
 
 struct grepfile_chunk {
@@ -125,9 +129,7 @@ struct worker {
 
 int torune(uint32_t *rune, const char *s);
 
-const char *unsafecasestr(const char *s);
-
-void grepper_init(struct grepper *g, const char *find, bool ignore_case);
+int grepper_init(struct grepper *g, const char *find, bool ignore_case);
 
 void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
 
