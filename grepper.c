@@ -585,21 +585,13 @@ const char *strstr_case(const char* s, size_t n, const char *lo, const char *up,
 }
 
 const char *indexbyte(const char *s, const char *end, const uint8_t a) {
-    // uint8x16_t needle = vdupq_n_u8(a);
-    asm volatile("dup.16b v9, %w0\n" : : "r"(a) : "memory");
-    uint64_t m = 0;
+    uint8x16_t needle = vdupq_n_u8(a);
 
     while (s <= end - 16) {
-        // uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-        // uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-        // uint8x8_t res = vshrn_n_u16(mask, 4);
-        // uint64_t m = vreinterpret_u64_u8(res);
-        asm volatile(
-                "ld1 { v0.16b }, [%1]\n"
-                "cmeq.16b v0, v0, v9\n"
-                "shrn.8b  v0, v0, #0x4\n"
-                "umov %0, v0.d[0]\n"
-                : "=r"(m) : "r"(s) : "memory");
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
+        uint8x8_t res = vshrn_n_u16(mask, 4);
+        uint64_t m = vreinterpret_u64_u8(res);
         if (m > 0)
             return s + __builtin_ctzll(m) / 4;
         s += 16;
@@ -613,22 +605,14 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a) {
 }
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
-    // uint8x16_t needle = vdupq_n_u8(a);
-    asm volatile("dup.16b v9, %w0\n" : : "r"(a) : "memory");
-    uint64_t m = 0;
+    uint8x16_t needle = vdupq_n_u8(a);
 
     while (start <= s - 16) {
         s -= 16;
-        // uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-        // uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-        // uint8x8_t res = vshrn_n_u16(mask, 4);
-        // uint64_t m = vreinterpret_u64_u8(res);
-        asm volatile(
-                "ld1 { v0.16b }, [%1]\n"
-                "cmeq.16b v0, v0, v9\n"
-                "shrn.8b  v0, v0, #0x4\n"
-                "umov %0, v0.d[0]\n"
-                : "=r"(m) : "r"(s) : "memory");
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
+        uint8x8_t res = vshrn_n_u16(mask, 4);
+        uint64_t m = vreinterpret_u64_u8(res);
         if (m > 0)
             return s + 15 - __builtin_clzll(m) / 4;
     }
@@ -727,17 +711,17 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
 #define FILE_UNLOCK() pthread_mutex_unlock(&file->lock)
 #endif
 
-bool is_buffer_eof(struct grepfile *file, struct grepfile_chunk *part)
+int grepfile_freeable(struct grepfile *file)
 {
-    if (file->off >= file->size)
-        return true;
+    int r = FREEABLE_NO;
     FILE_LOCK();
-    bool eof = file->off >= file->size;
+    if (file->off >= file->size)
+        r = file->chunk_refs == 0 ? FREEABLE_YES : FREEABLE_WAIT;
     FILE_UNLOCK();
-    return eof;
+    return r;
 }
 
-int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
+int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
 {
     FILE_LOCK();
 
@@ -748,11 +732,7 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
 
     // Record how many lines before this part.
     part->prev_lines = file->lines;
-    part->is_binary = file->is_binary;
-    part->is_binary_matching = file->is_binary_matching;
-    if (part->name)
-        free(part->name);
-    part->name = strdup(file->name);
+    part->file = file;
 
     // Fill buffer.
     int n = pread(file->fd, part->buf, part->buf_size, file->off);
@@ -764,7 +744,7 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
     }
     
     // Calc total lines.
-    if (!file->is_binary_matching)
+    if ((file->status & STATUS_IS_BINARY_MATCHING) == 0)
         file->lines += countbyte(part->buf, part->buf + n, '\n');
 
     int res;
@@ -777,15 +757,21 @@ int buffer_fill(struct grepfile *file, struct grepfile_chunk *part)
     } else {
         res = FILL_LAST_CHUNK;
     }
+
     part->data_size = n;
     file->off += n;
+    file->chunk_refs++;
+
     FILE_UNLOCK();
     return res;
 }
 
-int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
+int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
 {
-    int fd = open(file_name, O_RDONLY);
+    if (!matcher_match(file->root_matcher, file->name, false, part->buf, part->buf_size))
+        return OPEN_IGNORED;
+
+    int fd = open(file->name, O_RDONLY);
     if (fd < 0)
         return errno;
 
@@ -794,36 +780,36 @@ int grepfile_open(const char *file_name, struct grepper *g, struct grepfile *fil
         return errno;
     if (fs == 0) {
         close(fd);
-        return FILL_EMPTY;
+        return OPEN_EMPTY;
     }
 
     file->fd = fd;
-    file->name = file_name;
     file->size = fs;
     file->lines = 0;
     file->off = 0;
-    file->is_binary_matching = 0;
+    file->status = STATUS_OPENED;
 #ifdef __APPLE__
     file->lock = OS_UNFAIR_LOCK_INIT;
 #else
     pthread_mutex_init(&file->lock, NULL);
 #endif
 
-    int res = buffer_fill(file, part);
+    int res = grepfile_acquire_chunk(file, part);
     if (res == FILL_LAST_CHUNK) {
     } else if (res == FILL_OK) {
     } else if (res == FILL_EOF) {
+        abort(); // unreachable
     } else {
         return errno;
     }
 
-    part->is_binary = file->is_binary = indexbyte(part->buf, part->buf + MIN(1024, part->data_size), 0);
-    if (file->is_binary) {
+    if (indexbyte(part->buf, part->buf + MIN(1024, part->data_size), 0)) {
+        file->status |= STATUS_IS_BINARY;
         switch (g->binary_mode) {
             case BINARY_IGNORE:
                 return OPEN_BINARY_SKIPPED;
             case BINARY:
-                part->is_binary_matching = file->is_binary_matching = true;
+                file->status |= STATUS_IS_BINARY_MATCHING;
         }
     }
     return res;
@@ -836,11 +822,14 @@ int grepfile_release(struct grepfile *file)
 #ifndef __APPLE__
     pthread_mutex_destroy(&file->lock); 
 #endif
+    free(file->name);
+    free(file);
     return 1;
 }
 
-bool grepfile_process(struct grepper *g, struct grepfile_chunk *part)
+void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
+    struct grepfile *file = part->file;
     csview rx_match[g->rx.groups];
     struct grepline gl = {
         .g = g,
@@ -858,7 +847,7 @@ bool grepfile_process(struct grepper *g, struct grepfile_chunk *part)
             s = indexcasestr(g, s, end);
         }
         if (!s)
-            break;
+            goto EXIT;
 
         const char *line_start = indexlastbyte(part->buf, s, '\n');
         line_start = line_start ? line_start + 1 : part->buf;
@@ -896,8 +885,12 @@ NG:
             continue;
         }
 
-        if (!g->callback(&gl))
-            return false;
+        if (!g->callback(&gl)) {
+            FILE_LOCK();
+            file->off = file->size;
+            FILE_UNLOCK();
+            goto EXIT;
+        }
 
         for (int i = 0; i < g->after_lines; i++) {
             const char *ss = line_end + 1;
@@ -922,5 +915,7 @@ NG:
     }
 
 EXIT:
-    return 0;
+    FILE_LOCK();
+    file->chunk_refs--;
+    FILE_UNLOCK();
 }

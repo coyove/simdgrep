@@ -19,6 +19,9 @@
 #include <os/lock.h>
 #endif
 
+#include "stack.h"
+#include "pathutil.h"
+
 #include "STC/include/stc/cregex.h"
 
 #if defined(__x86_64__)
@@ -40,14 +43,26 @@ static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 #define BINARY_TEXT 1
 #define BINARY_IGNORE 2
 
+#define OPEN_EMPTY -98
+#define OPEN_IGNORED -99
 #define OPEN_BINARY_SKIPPED -100
+
 #define FILL_OK -1
-#define FILL_EMPTY -2
 #define FILL_LAST_CHUNK -8
 #define FILL_EOF -9
 
 #define INIT_OK 0
 #define INIT_INVALID_UTF8 -2
+
+#define STATUS_QUEUED 1
+#define STATUS_OPENED 2
+#define STATUS_IS_DIR 32
+#define STATUS_IS_BINARY 64
+#define STATUS_IS_BINARY_MATCHING 128
+
+#define FREEABLE_YES -1
+#define FREEABLE_NO -1
+#define FREEABLE_WAIT -2
 
 static int64_t now() {
     struct timespec start;
@@ -96,13 +111,15 @@ struct grepper {
 };
 
 struct grepfile {
+    struct stacknode node;
     int fd;
-    const char *name;
+    char *name;
     int64_t size;
     int64_t off;
-    bool is_binary_matching;
-    bool is_binary;
+    int16_t status;
+    int32_t chunk_refs;
     int64_t lines;
+    struct matcher *root_matcher;
 #ifdef __APPLE__
     os_unfair_lock lock;
 #else
@@ -113,11 +130,9 @@ struct grepfile {
 struct grepfile_chunk {
     int64_t prev_lines;
     char *buf;
-    char *name;
     ssize_t buf_size;
     ssize_t data_size;
-    bool is_binary_matching;
-    bool is_binary;
+    struct grepfile *file;
 };
 
 struct worker {
@@ -141,11 +156,13 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
         const char *line_start, const char *s, const char *line_end);
 
-int grepfile_open(const char *, struct grepper *, struct grepfile *, struct grepfile_chunk *);
+int grepfile_open(struct grepper *, struct grepfile *, struct grepfile_chunk *);
 
 int grepfile_release(struct grepfile *file);
 
-bool grepfile_process(struct grepper *g, struct grepfile_chunk *part);
+int grepfile_acquire_chunk(struct grepfile *, struct grepfile_chunk *);
+
+void grepfile_process_chunk(struct grepper *, struct grepfile_chunk *);
 
 int64_t countbyte(const char *s, const char *end, uint8_t c);
 
@@ -153,8 +170,6 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
-int buffer_fill(struct grepfile *, struct grepfile_chunk *);
-
-bool is_buffer_eof(struct grepfile *, struct grepfile_chunk *);
+int grepfile_freeable(struct grepfile *file);
 
 #endif
