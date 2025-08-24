@@ -711,14 +711,26 @@ int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
 #define FILE_UNLOCK() pthread_mutex_unlock(&file->lock)
 #endif
 
-int grepfile_freeable(struct grepfile *file)
+int grepfile_inc_ref(struct grepfile *file)
 {
-    int r = FREEABLE_NO;
+    int r;
     FILE_LOCK();
-    if (file->off >= file->size)
-        r = file->chunk_refs == 0 ? FREEABLE_YES : FREEABLE_WAIT;
+    if (file->off >= file->size) {
+        r = file->chunk_refs == 0 ? INC_FREEABLE : INC_WAIT_FREEABLE;
+    } else {
+        file->chunk_refs++;
+        r = INC_NEXT;
+    }
     FILE_UNLOCK();
     return r;
+}
+
+void grepfile_dec_ref(struct grepfile *file)
+{
+    FILE_LOCK();
+    assert(file->chunk_refs > 0);
+    file->chunk_refs--;
+    FILE_UNLOCK();
 }
 
 int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
@@ -760,7 +772,6 @@ int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
 
     part->data_size = n;
     file->off += n;
-    file->chunk_refs++;
 
     FILE_UNLOCK();
     return res;
@@ -775,24 +786,16 @@ int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chun
     if (fd < 0)
         return errno;
 
-    size_t fs = lseek(fd, 0, SEEK_END);
-    if (fs < 0)
-        return errno;
-    if (fs == 0) {
-        close(fd);
-        return OPEN_EMPTY;
-    }
-
-    file->fd = fd;
-    file->size = fs;
     file->lines = 0;
     file->off = 0;
     file->status = STATUS_OPENED;
-#ifdef __APPLE__
-    file->lock = OS_UNFAIR_LOCK_INIT;
-#else
-    pthread_mutex_init(&file->lock, NULL);
-#endif
+    file->fd = fd;
+    file->size = lseek(fd, 0, SEEK_END);
+    file->chunk_refs = 1;
+    if (file->size < 0)
+        return errno;
+    if (file->size == 0)
+        return OPEN_EMPTY;
 
     int res = grepfile_acquire_chunk(file, part);
     if (res == FILL_LAST_CHUNK) {
@@ -905,8 +908,7 @@ NG:
             gl.line = ss;
             gl.match_start = gl.match_end = gl.len = line_end - ss;
             gl.is_ctxline = true;
-            if (!g->callback(&gl))
-                goto EXIT;
+            g->callback(&gl);
 
             last_hit = line_end;
         }
@@ -915,7 +917,5 @@ NG:
     }
 
 EXIT:
-    FILE_LOCK();
-    file->chunk_refs--;
-    FILE_UNLOCK();
+    (void)0;
 }

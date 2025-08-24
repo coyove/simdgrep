@@ -6,22 +6,24 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
+#define STACK_NEXT ((1ull << 56) - 1)
+
 #define FOREACH_STACK(s, n) \
-    for (struct stacknode *n = (struct stacknode *)(atomic_load(&(s)->root) << 1 >> 1), *n##next = 0; \
-            (n##next = n ? (struct stacknode *)(atomic_load(&n->next) << 1 >> 1) : 0, n); n = n##next)
+    for (struct stacknode *n = (struct stacknode *)(atomic_load(&(s)->root) & STACK_NEXT), *n##next = NULL; \
+            (n##next = n ? (struct stacknode *)(atomic_load(&n->next) & STACK_NEXT) : NULL, n); n = n##next)
 
 struct stacknode {
-    uint64_t _Atomic next;
+    _Atomic uint64_t next;
 };
 
 struct stack {
     _Atomic int64_t count;
-    uint64_t _Atomic root;
+    _Atomic uint64_t root;
 };
 
-void stack_push(struct stack *, struct stacknode *);
+void stack_push(uint8_t tid, struct stack *l, struct stacknode *n);
 
-struct stacknode *stack_pop(struct stack *);
+struct stacknode *stack_pop(uint8_t tid, struct stack *);
 
 size_t stack_free(struct stack *);
 
