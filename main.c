@@ -39,21 +39,50 @@ struct stack tasks;
 struct stack matchers;
 struct grepper g;
 
-void push_task(struct grepfile *t)
+pthread_mutex_t task_lock = PTHREAD_MUTEX_INITIALIZER;
+struct grepfile *taskq[100000];
+static int taskqi = 0;
+
+void push_task(uint8_t tid, struct grepfile *t)
 {
-    stack_push(&tasks, (struct stacknode *)t);
+#if 1 
+    stack_push(tid, &tasks, (struct stacknode *)t);
+#else
+    pthread_mutex_lock(&task_lock);
+    taskq[taskqi++] = t;
+    pthread_mutex_unlock(&task_lock);
+#endif
 }
 
-void new_task(char *name, struct matcher *m, bool is_dir)
+struct grepfile *pop_task(uint8_t tid)
 {
-    struct grepfile *t = (struct grepfile *)malloc(sizeof(struct grepfile));
-    memset(t, 0, sizeof(struct grepfile));
-    t->name = name;
-    t->root_matcher = m;
-    t->status = STATUS_QUEUED;
+    pthread_mutex_lock(&task_lock);
+#if 1
+    struct grepfile *file = (struct grepfile *)stack_pop(tid, &tasks);
+#else
+    struct grepfile *file = 0;
+    if (taskqi > 0)
+        file = taskq[--taskqi];
+#endif
+    pthread_mutex_unlock(&task_lock);
+    return file;
+}
+
+void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
+{
+    struct grepfile *file = (struct grepfile *)malloc(sizeof(struct grepfile));
+    memset(file, 0, sizeof(struct grepfile));
+    file->name = name;
+    file->root_matcher = m;
+    file->status = STATUS_QUEUED;
     if (is_dir)
-        t->status |= STATUS_IS_DIR;
-    push_task(t);
+        file->status |= STATUS_IS_DIR;
+#ifdef __APPLE__
+    file->lock = OS_UNFAIR_LOCK_INIT;
+#else
+    pthread_mutex_init(&file->lock, NULL);
+#endif
+    push_task(tid, file);
     if (!is_dir)
         atomic_fetch_add(&flags.files, 1);
 }
@@ -64,7 +93,7 @@ void *push(void *arg)
     struct grepfile *file;
 
 NEXT:
-    file = (struct grepfile *)stack_pop(&tasks);
+    file = pop_task(p->tid);
     if (!file) {
         if (atomic_load(p->actives)) {
             struct timespec req = { .tv_sec = 0, .tv_nsec = 10000000 /* 10ms */ };
@@ -81,13 +110,13 @@ NEXT:
         if (!matcher_match(file->root_matcher, file->name, true, p->chunk.buf, p->chunk.buf_size)) {
             atomic_fetch_add(&flags.ignores, 1);
             DBG("ignore directory %s\n", p->chunk.buf);
-            goto CLEANUP_TASK;
+            goto FREE_FILE;
         }
 
         DIR *dir = opendir(file->name);
         if (dir == NULL) {
             ERR("open %s", file->name);
-            goto CLEANUP_TASK;
+            goto FREE_FILE;
         }
 
         struct matcher *root = file->root_matcher;
@@ -116,19 +145,18 @@ NEXT:
             } else {
                 dir = dirent->d_type == DT_DIR;
             }
-            new_task(n, root, dir);
+            new_task(p->tid, n, root, dir);
         }
         closedir(dir);
     } else if (file->status & STATUS_OPENED) {
-        int res = grepfile_freeable(file);
-        if (res == FREEABLE_WAIT) {
-            push_task(file);
+        int res = grepfile_inc_ref(file);
+        if (res == INC_WAIT_FREEABLE) {
+            push_task(p->tid, file);
             goto CONTINUE_LOOP;
-        }
-        if (res == FREEABLE_YES) {
-            goto CLEANUP_TASK;
-        }
-        push_task(file);
+        } else if (res == INC_FREEABLE) {
+            goto FREE_FILE;
+        } // INC_NEXT
+        push_task(p->tid, file);
         res = grepfile_acquire_chunk(file, &p->chunk);
         if (res == FILL_OK || res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
@@ -136,6 +164,7 @@ NEXT:
         } else {
             ERR("read %s", file->name);
         }
+        grepfile_dec_ref(file);
         goto CONTINUE_LOOP;
     } else {
         int res = grepfile_open(&g, file, &p->chunk);
@@ -155,21 +184,22 @@ NEXT:
                 grepfile_process_chunk(&g, &p->chunk);
                 int res = grepfile_acquire_chunk(file, &p->chunk);
                 if (res != FILL_OK && res != FILL_LAST_CHUNK)
-                    goto CLEANUP_TASK;
+                    goto FREE_FILE;
             }
-            push_task(file);
+            push_task(p->tid, file);
             grepfile_process_chunk(&g, &p->chunk);
+            grepfile_dec_ref(file);
             goto CONTINUE_LOOP;
         } else {
             ERR("read %s", file->name);
         }
     }
 
-CLEANUP_TASK:
+FREE_FILE:
     grepfile_release(file);
 
 CONTINUE_LOOP:
-    atomic_fetch_add(p->actives, -1);
+    atomic_fetch_sub(p->actives, 1);
     goto NEXT;
 }
 
@@ -278,7 +308,7 @@ void usage()
     printf("\t-C N\tcombine (-A N) and (-B N)\n");
     printf("\t-M N\tsplit lines longer than N kilobytes (default: 64K), thus\n");
     printf("\t\tmatches may be incomplete at split points\n");
-    printf("\t-j N\tspawn N threads for searching\n");
+    printf("\t-j N\tspawn N threads for searching (1-255)\n");
     abort();
 }
 
@@ -325,7 +355,7 @@ int main(int argc, char **argv)
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
-        case 'j': flags.num_threads = MAX(1, atoi(optarg)); break;
+        case 'j': flags.num_threads = MIN(MAX(1, atoi(optarg)), 255); break;
         case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
         case 'E':
                   LOG("* add exclude pattern %s\n", optarg);
@@ -396,14 +426,15 @@ int main(int argc, char **argv)
             abort();
         }
         LOG("* search %s\n", joined);
-        new_task(joined, &flags.default_matcher, is_dir(joined, true));
+        new_task(0, joined, &flags.default_matcher, is_dir(joined, true));
     }
     if (tasks.count == 0) {
-        new_task(strdup(flags.cwd), &flags.default_matcher, true);
+        new_task(0, strdup(flags.cwd), &flags.default_matcher, true);
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
         workers[i].actives = &actives;
+        workers[i].tid = (uint8_t)i;
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
         workers[i].chunk.buf_size = flags.line_size;
         workers[i].chunk.buf = (char *)malloc(flags.line_size + 65);

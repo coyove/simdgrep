@@ -189,7 +189,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     }
     memcpy(buf + 1, l, end - l);
     buf[1 + end - l] = 0;
-    stack_push(incl ? &m->includes : ss, (struct stacknode *)node);
+    stack_push(0, incl ? &m->includes : ss, (struct stacknode *)node);
     return true;
 }
 
@@ -243,7 +243,7 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
     if (m) {
         m->parent = parent->top;
         m->top = parent->top;
-        stack_push(matchers, (struct stacknode *)m);
+        stack_push(0, matchers, (struct stacknode *)m);
         parent = m;
     }
 
@@ -252,7 +252,7 @@ GITIGNORE:
     if (m) {
         m->parent = enter_repo ? parent->top : parent;
         m->top = parent->top;
-        stack_push(matchers, (struct stacknode *)m);
+        stack_push(0, matchers, (struct stacknode *)m);
     }
     return m;
 }
