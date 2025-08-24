@@ -60,9 +60,9 @@ static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 #define STATUS_IS_BINARY 64
 #define STATUS_IS_BINARY_MATCHING 128
 
-#define FREEABLE_YES -1
-#define FREEABLE_NO -1
-#define FREEABLE_WAIT -2
+#define INC_NEXT 0
+#define INC_FREEABLE -1
+#define INC_WAIT_FREEABLE -2
 
 static int64_t now() {
     struct timespec start;
@@ -116,7 +116,7 @@ struct grepfile {
     char *name;
     int64_t size;
     int64_t off;
-    int16_t status;
+    uint16_t status;
     int32_t chunk_refs;
     int64_t lines;
     struct matcher *root_matcher;
@@ -138,6 +138,7 @@ struct grepfile_chunk {
 struct worker {
     pthread_t thread;
     int32_t _Atomic *actives;
+    uint8_t tid;
     struct grepfile_chunk chunk;
 };
 
@@ -160,6 +161,10 @@ int grepfile_open(struct grepper *, struct grepfile *, struct grepfile_chunk *);
 
 int grepfile_release(struct grepfile *file);
 
+int grepfile_inc_ref(struct grepfile *file);
+
+void grepfile_dec_ref(struct grepfile *file);
+
 int grepfile_acquire_chunk(struct grepfile *, struct grepfile_chunk *);
 
 void grepfile_process_chunk(struct grepper *, struct grepfile_chunk *);
@@ -169,7 +174,5 @@ int64_t countbyte(const char *s, const char *end, uint8_t c);
 const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
-
-int grepfile_freeable(struct grepfile *file);
 
 #endif

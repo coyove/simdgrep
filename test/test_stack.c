@@ -1,9 +1,16 @@
-#include "stack.h"
+#include "../stack.h"
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <memory.h>
 #include <pthread.h>
 
 const int N = 1000000;
+
+typedef struct {
+    struct stacknode node;
+    int value;
+} integer ;
 
 struct payload {
     int i;
@@ -15,17 +22,18 @@ void *push(void *arg)
 {
     struct payload *p = (struct payload *)arg;
     for (int n = 0; n < N; ++n) {
-        int *c = (int *)malloc(sizeof(int));
-        *c = p->i * N + n;
-        stack_push(p->s, c);
+        integer *c = (integer *)malloc(sizeof(integer));
+        memset(c, 0, sizeof(integer));
+        c->value = p->i * N + n;
+        stack_push(p->s, (struct stacknode *)c);
     }
-    int *o = (int *)malloc(sizeof(int));
     for (int c = 0; ; c++) {
-        if (!stack_pop(p->s, (void **)&o)) {
+        integer *o = (integer *)stack_pop(p->s);
+        if (!o) {
             printf("%d %d\n", p->i, c);
             break;
         }
-        p->out[*o] = 1;
+        p->out[o->value]++;
         // printf("%d %d\n", p->i, *o);
     }
     return 0;
@@ -49,12 +57,12 @@ int main()
         pthread_join(threads[i], NULL);
     }
     for (int i = 0; i < 4 * N; i++) {
-        if (res[i] == 0) {
+        if (res[i] != 1) {
             perror("failed");
             return -1;
         }
     }
 
-    printf("%d\n", stack_free(&s));
+    stack_free(&s);
     return 0;
 }
