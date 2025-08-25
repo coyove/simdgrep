@@ -12,7 +12,7 @@ test_stack: test/test_stack.c stack.c
 	$(CC) -O3 test/test_stack.c stack.c
 
 sg: ${OBJS}
-	$(CC) -O3 -o simdgrep $^
+	$(CC) -O3 -lpthread -o simdgrep $^
 
 %.o: %.c
 	$(CC) $(CFLAGS) -O3 -g -c $< -o $@

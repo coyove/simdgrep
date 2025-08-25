@@ -28,7 +28,7 @@ char *join_path(const char *cwd, const char *b, int len);
 
 bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *rule, int n);
 
-void matcher_free(struct matcher *m);
+void matcher_free(void *m);
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl);
 

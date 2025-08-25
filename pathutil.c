@@ -149,13 +149,15 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
     return m->parent ? matcher_match(m->parent, orig, is_dir, reason, rn) : true;
 }
 
-void matcher_free(struct matcher *m)
+void matcher_free(void *p)
 {
+    struct matcher *m = (struct matcher *)p;
     if (m->root)
         free(m->root);
     stack_free(&m->includes);
     stack_free(&m->excludes);
     stack_free(&m->negate_excludes);
+    free(m);
 }
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl)
@@ -227,7 +229,6 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
         return m;
 
     matcher_free(m);
-    free(m);
     return NULL;
 }
 

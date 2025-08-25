@@ -29,14 +29,14 @@ static struct _flags {
     int xbytes;
     int verbose;
     pthread_mutex_t lock; 
-    struct matcher default_matcher;
+    struct matcher *default_matcher;
     int64_t _Atomic ignores;
     int64_t _Atomic files;
 } flags;
 
-struct stack tasks;
-struct stack matchers;
-struct grepper g;
+struct stack tasks = {0};
+struct stack matchers = {0};
+struct grepper g = {0};
 
 pthread_mutex_t task_lock = PTHREAD_MUTEX_INITIALIZER;
 struct grepfile *taskq[100000];
@@ -79,7 +79,10 @@ void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
 #ifdef __APPLE__
     file->lock = OS_UNFAIR_LOCK_INIT;
 #else
-    pthread_mutex_init(&file->lock, NULL);
+    if (pthread_mutex_init(&file->lock, NULL) != 0) {
+        ERR0("out of resource\n");
+        exit(1);
+    }
 #endif
     push_task(tid, file);
     if (!is_dir)
@@ -179,7 +182,7 @@ NEXT:
         } else if (res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
         } else if (res == FILL_OK) {
-            while (file->status & STATUS_IS_BINARY_MATCHING) {
+            while (file->status & STATUS_IS_BINARY_MATCHING || tasks.count > flags.num_threads) {
                 grepfile_process_chunk(&g, &p->chunk);
                 int res = grepfile_acquire_chunk(file, &p->chunk);
                 if (res != FILL_OK && res != FILL_LAST_CHUNK)
@@ -302,10 +305,8 @@ void usage()
     printf("\t-I\tignore binary files\n");
     printf("\t-x N\ttruncate long matched lines to N bytes to make output compact\n");
     printf("\t-A N\tprint N lines of trailing context\n");
-    printf("\t-B N\tprint N lines of leading context\n");
-    printf("\t-C N\tcombine (-A N) and (-B N)\n");
     printf("\t-j N\tspawn N threads for searching (1-255)\n");
-    abort();
+    exit(0);
 }
 
 int main(int argc, char **argv) 
@@ -321,15 +322,13 @@ int main(int argc, char **argv)
     flags.quiet = 0;
     flags.xbytes = 1e8;
     flags.verbose = 7;
-    flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    flags.num_threads = MIN(255, sysconf(_SC_NPROCESSORS_ONLN) * 2);
     getcwd(flags.cwd, sizeof(flags.cwd));
 
-    memset(&flags.default_matcher, 0, sizeof(struct matcher));
-    flags.default_matcher.top = &flags.default_matcher;
+    flags.default_matcher = (struct matcher *)malloc(sizeof(struct matcher));
+    memset(flags.default_matcher, 0, sizeof(struct matcher));
+    flags.default_matcher->top = flags.default_matcher;
 
-    memset(&tasks, 0, sizeof(tasks));
-    memset(&matchers, 0, sizeof(matchers));
-    memset(&g, 0, sizeof(g));
     g.callback = grep_callback;
 
     int cop;
@@ -346,14 +345,13 @@ int main(int argc, char **argv)
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
         case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
-        case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
         case 'j': flags.num_threads = MIN(MAX(1, atoi(optarg)), 255); break;
         case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
         case 'E':
                   LOG("* add exclude pattern %s\n", optarg);
-                  matcher_add_rule(&flags.default_matcher, optarg, optarg + strlen(optarg), false);
+                  matcher_add_rule(flags.default_matcher, optarg, optarg + strlen(optarg), false);
                   break;
         default: usage();
         }
@@ -408,7 +406,7 @@ int main(int argc, char **argv)
         const char *g = is_glob_path(name, name + strlen(name));
         char *joined;
         if (g) {
-            matcher_add_rule(&flags.default_matcher, g, g + strlen(g), true);
+            matcher_add_rule(flags.default_matcher, g, g + strlen(g), true);
             LOG("* add include pattern %s\n", g);
             joined = name == g ? join_path(flags.cwd, ".", 1) : join_path(flags.cwd, name, g - name);
         } else {
@@ -419,10 +417,10 @@ int main(int argc, char **argv)
             abort();
         }
         LOG("* search %s\n", joined);
-        new_task(0, joined, &flags.default_matcher, is_dir(joined, true));
+        new_task(0, joined, flags.default_matcher, is_dir(joined, true));
     }
     if (tasks.count == 0) {
-        new_task(0, strdup(flags.cwd), &flags.default_matcher, true);
+        new_task(0, strdup(flags.cwd), flags.default_matcher, true);
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
@@ -438,22 +436,21 @@ int main(int argc, char **argv)
         pthread_join(workers[i].thread, NULL);
         free(workers[i].chunk.buf);
     }
+    assert(tasks.count == 0);
 
-    stack_free(&tasks);
     LOG("* searched %lld files\n", flags.files);
 
-    FOREACH_STACK(&matchers, n)
-        matcher_free((struct matcher *)n);
-    int num_ignorefiles = stack_free(&matchers);
+    int num_ignorefiles = matchers.count;
     if (flags.no_ignore) {
         LOG("* all files are searched, no ignores\n");
     } else {
         LOG("* respected %d .gitignore, %lld files ignored\n", num_ignorefiles, flags.ignores);
     }
+    stack_free(&matchers, matcher_free);
 
 EXIT:
     grepper_free(&g);
-    matcher_free(&flags.default_matcher);
+    matcher_free(flags.default_matcher);
     pthread_mutex_destroy(&flags.lock); 
     return 0;
 }
