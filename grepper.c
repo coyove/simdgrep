@@ -90,18 +90,13 @@ static bool safecase(uint32_t r)
 static int _rx_skip_bracket(const char *s, int i)
 {
     int depth = 1;
-    for (++i; depth; ++i) {
+    for (++i; depth && *(s + i); ++i) {
         char c = *(s + i);
-        if (!c)
-            return i;
         if (c != '[' && c != ']')
             continue;
         if (*(s + i - 1) == '\\')
             continue;
-        if (c == '[')
-            depth++;
-        if (c == ']')
-            depth--;
+        depth += c == '[' ? 1 : -1;
     }
     return i;
 }
@@ -109,20 +104,16 @@ static int _rx_skip_bracket(const char *s, int i)
 static int _rx_skip_paren(const char *s, int i)
 {
     int depth = 1;
-    for (++i; depth; ++i) {
+    for (++i; depth && *(s + i); ++i) {
         char c = *(s + i);
-        if (!c)
-            return i;
         if (c != '(' && c != ')' && c != '[')
             continue;
         if (*(s + i - 1) == '\\')
             continue;
         if (c == '[')
             i = _rx_skip_bracket(s, i) - 1; // ++i
-        if (c == '(')
-            depth++;
-        if (c == ')')
-            depth--;
+        else
+            depth += c == '(' ? 1 : -1;
     }
     return i;
 }
@@ -286,17 +277,13 @@ UNSUPPORTED:
     snprintf(g->rx.error, 256, "invalid escape at '%s'", s + i - 1);
 }
 
-bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
+static bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
         const char *line_start, const char *s, const char *line_end)
 {
     if (g->rx.use_regex) {
         const char *rx_start = g->rx.fixed_start ? s : line_start;
-        char end_ch = *line_end;
 
-        *(char *)line_end = 0;
         int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match, CREG_DEFAULT);
-        *(char *)line_end = end_ch;
-
         if (rc != CREG_OK)
             return false;
 
@@ -571,8 +558,9 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
 
 #endif
 
-int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
-    g->ignore_case = ignore_case;
+int grepper_init(struct grepper *g, const char *find, bool ignore_case)
+{
+    g->original_ignore_case = g->ignore_case = ignore_case;
     g->len = strlen(find);
 
     if (!ignore_case) {
@@ -583,6 +571,7 @@ int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
         g->findlower = g->findupper + g->len + 4;
         memcpy(g->find, find, g->len);
         utf8_decode_t d = {.state=0};
+        size_t caseless = 0;
         for (size_t off = 0; off < g->len; ) {
             uint32_t r;
             int n = torune(&r, find + off);
@@ -591,10 +580,17 @@ int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
             uint32_t up = utf8_toupper(r), lo = utf8_tolower(r);
             int n1 = utf8_encode(g->findupper + off, up);
             int n2 = utf8_encode(g->findlower + off, lo);
+            off += n;
+
+            if (up == lo && up == r) {
+                caseless += n;
+                continue;
+            }
             if (n1 != n2 || n1 != n) 
                 return r;
-            off += n;
         }
+        if (caseless == g->len)
+            g->ignore_case = false;
         // printf("%.*s\n", g->len, g->find);
         // printf("%.*s\n", g->len, g->findupper);
         // printf("%.*s\n", g->len, g->findlower);
@@ -604,10 +600,11 @@ int grepper_init(struct grepper *g, const char *find, bool ignore_case) {
     return INIT_OK;
 }
 
-struct grepper *grepper_add(struct grepper *g, const char *find) {
+struct grepper *grepper_add(struct grepper *g, const char *find)
+{
     struct grepper *ng = (struct grepper *)malloc(sizeof(struct grepper));
     memset(ng, 0, sizeof(struct grepper));
-    grepper_init(ng, find, g->ignore_case);
+    grepper_init(ng, find, g->original_ignore_case);
 
     while (g->next_g)
         g = g->next_g;
@@ -616,18 +613,20 @@ struct grepper *grepper_add(struct grepper *g, const char *find) {
     return ng;
 }
 
-void grepper_free(struct grepper *g) {
-  if (g->find)
-    free(g->find);
-  if (g->next_g)
-    grepper_free(g->next_g);
-  if (g->rx.use_regex)
-    cregex_drop(&g->rx.engine);
-  if (g->rx.error)
-    free(g->rx.error);
+void grepper_free(struct grepper *g)
+{
+    if (g->find)
+        free(g->find);
+    if (g->next_g)
+        grepper_free(g->next_g);
+    if (g->rx.use_regex)
+        cregex_drop(&g->rx.engine);
+    if (g->rx.error)
+        free(g->rx.error);
 }
 
-static const char *indexcasestr(struct grepper *g, const char *s, const char *end) {
+static const char *indexcasestr(struct grepper *g, const char *s, const char *end)
+{
     if (s + g->len > end)
         return 0;
 
@@ -849,8 +848,8 @@ int grepfile_release(struct grepfile *file)
 
 void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
-    struct grepfile *file = part->file;
     csview rx_match[g->rx.groups];
+    struct grepfile *file = part->file;
     struct grepline gl = {
         .g = g,
         .file = part,

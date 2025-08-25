@@ -100,6 +100,7 @@ struct grepper {
     char *findupper;
     char *findlower;
     bool ignore_case;
+    bool original_ignore_case;
     bool slow_rx;
     bool search_name;
     int binary_mode;
@@ -157,9 +158,6 @@ struct grepper *grepper_add(struct grepper *g, const char *find);
 void grepper_free(struct grepper *g);
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
-
-bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
-        const char *line_start, const char *s, const char *line_end);
 
 int grepfile_open(struct grepper *, struct grepfile *, struct grepfile_chunk *);
 

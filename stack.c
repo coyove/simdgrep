@@ -39,13 +39,3 @@ struct stacknode *stack_pop(uint8_t tid, struct stack *l)
     }
 	return NULL;
 }
-
-size_t stack_free(struct stack *s)
-{
-    size_t c = 0;
-    FOREACH_STACK(s, n) {
-        free(n);
-        c++;
-	}
-    return c;
-}
