@@ -28,7 +28,6 @@ static struct _flags {
     int quiet;
     int xbytes;
     int verbose;
-    int64_t line_size;
     pthread_mutex_t lock; 
     struct matcher default_matcher;
     int64_t _Atomic ignores;
@@ -303,11 +302,8 @@ void usage()
     printf("\t-I\tignore binary files\n");
     printf("\t-x N\ttruncate long matched lines to N bytes to make output compact\n");
     printf("\t-A N\tprint N lines of trailing context\n");
-    printf("\t-B N\tprint N lines of leading context, actual N of printable lines\n");
-    printf("\t\tis affected by -M and -m flags at runtime\n");
+    printf("\t-B N\tprint N lines of leading context\n");
     printf("\t-C N\tcombine (-A N) and (-B N)\n");
-    printf("\t-M N\tsplit lines longer than N kilobytes (default: 64K), thus\n");
-    printf("\t\tmatches may be incomplete at split points\n");
     printf("\t-j N\tspawn N threads for searching (1-255)\n");
     abort();
 }
@@ -324,7 +320,6 @@ int main(int argc, char **argv)
     flags.ignore_case = true;
     flags.quiet = 0;
     flags.xbytes = 1e8;
-    flags.line_size = 64 << 10;
     flags.verbose = 7;
     flags.num_threads = sysconf(_SC_NPROCESSORS_ONLN);
     getcwd(flags.cwd, sizeof(flags.cwd));
@@ -350,7 +345,6 @@ int main(int argc, char **argv)
         case 'G': flags.no_ignore = true; break;
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
-        case 'M': flags.line_size = MAX(1, atoi(optarg)) << 10; break;
         case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
@@ -375,7 +369,6 @@ int main(int argc, char **argv)
         goto EXIT;
     
     LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
-    LOG("* line size: %lldK\n", flags.line_size >> 10);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
@@ -436,8 +429,8 @@ int main(int argc, char **argv)
         workers[i].actives = &actives;
         workers[i].tid = (uint8_t)i;
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
-        workers[i].chunk.buf_size = flags.line_size;
-        workers[i].chunk.buf = (char *)malloc(flags.line_size + 65);
+        workers[i].chunk.buf_size = 65536;
+        workers[i].chunk.buf = (char *)malloc(65600);
         pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
