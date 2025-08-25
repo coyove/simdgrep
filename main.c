@@ -2,6 +2,7 @@
 #include "grepper.h"
 #include "wildmatch.h"
 #include "pathutil.h"
+#include "printer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,30 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define LOCK() pthread_mutex_lock(&flags.lock)
-#define UNLOCK() pthread_mutex_unlock(&flags.lock)
-#define DBG(msg, ...) if (flags.quiet < -1) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
-#define LOG(msg, ...) if (flags.quiet < 0) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
-#define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
-#define ERR0(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg "\n", ##__VA_ARGS__); UNLOCK(); }
-#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg ": %s\n", ##__VA_ARGS__, strerror(errno)); UNLOCK(); }
-
-static struct _flags {
-    char cwd[PATH_MAX];
-    bool ignore_case;
-    bool color;
-    bool fixed_string;
-    bool no_ignore;
-    int num_threads;
-    int quiet;
-    int xbytes;
-    int verbose;
-    pthread_mutex_t lock; 
-    struct matcher *default_matcher;
-    int64_t _Atomic ignores;
-    int64_t _Atomic files;
-} flags;
-
+struct matcher *default_matcher;
 struct stack tasks = {0};
 struct stack matchers = {0};
 struct grepper g = {0};
@@ -185,8 +163,11 @@ NEXT:
             while (file->status & STATUS_IS_BINARY_MATCHING || tasks.count > flags.num_threads) {
                 grepfile_process_chunk(&g, &p->chunk);
                 int res = grepfile_acquire_chunk(file, &p->chunk);
-                if (res != FILL_OK && res != FILL_LAST_CHUNK)
+                if (res != FILL_OK && res != FILL_LAST_CHUNK) {
+                    if (res != FILL_EOF)
+                        ERR("read %s", file->name);
                     goto FREE_FILE;
+                }
             }
             push_task(p->tid, file);
             grepfile_process_chunk(&g, &p->chunk);
@@ -205,85 +186,6 @@ CONTINUE_LOOP:
     goto NEXT;
 }
 
-void print_n(const char *a, const char *b, int len, const char *c)
-{
-    if (a && *a)
-        fwrite(a, 1, strlen(a), stdout);
-    fwrite(b, 1, len, stdout);
-    if (c && *c)
-        fwrite(c, 1, strlen(c), stdout);
-}
-
-void print_s(const char *a, const char *b, const char *c)
-{
-    print_n(a, b, strlen(b), c);
-}
-
-void print_i(const char *a, uint64_t b, const char *c)
-{
-    char buf[32];
-    char *s = buf + 32;
-    do {
-        *(--s) = b % 10 + '0';
-        b /= 10;
-    } while(b);
-    print_n(a, s, buf + 32 - s, c);
-}
-
-bool grep_callback(const struct grepline *l)
-{
-    const char *name = rel_path(flags.cwd, l->file->file->name);
-    LOCK();
-    if (l->file->file->status & STATUS_IS_BINARY_MATCHING) {
-        if (flags.verbose) {
-            printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
-        }
-        UNLOCK();
-        return false;
-    } else {
-        int i = 0, j = l->len;
-        if (l->len > flags.xbytes + g.len + 10) {
-            i = MAX(0, l->match_start - flags.xbytes / 2);
-            j = MIN(l->len, l->match_end + flags.xbytes / 2);
-            for (; i > 0 && ((uint8_t)l->line[i] >> 6) == 2; i--);
-            for (; j < l->len && ((uint8_t)l->line[j] >> 6) == 2; j++);
-        }
-
-        if (l->is_ctxline || !flags.color) {
-            if (flags.verbose & 4)
-                print_s(0, name, flags.verbose > 4 ? ":" : "");
-            if (flags.verbose & 2)
-                print_i(0, l->nr + 1, (flags.verbose & 1) ? ":" : "");
-            if (flags.verbose & 1) {
-                print_s(0, i == 0 ? "" : "...", 0);
-                print_n(0, l->line + i, j - i, 0);
-                print_s(0, j == l->len ? "" : "...", 0);
-            }
-        } else {
-            if (flags.verbose & 4)
-                print_s("\033[0;35m", name, flags.verbose > 4 ? "\033[0m:" : "\033[0m"); 
-            if (flags.verbose & 2)
-                print_i("\033[1;32m", l->nr + 1, (flags.verbose & 1) ? "\033[0m:" : "\033[0m"); 
-            if (flags.verbose & 1) {
-                // left ellipsis
-                print_s("\033[1;33m", i == 0 ? "" : "...", "\033[0m"); 
-                // before context
-                print_n(0, l->line + i, l->match_start - i, 0); 
-                // hightlight match
-                print_n("\033[1;31m", l->line + l->match_start, l->match_end - l->match_start, "\033[0m"); 
-                // after context
-                print_n(0, l->line + l->match_end, j - l->match_end, 0); 
-                // right ellipsis
-                print_s("\033[1;33m", j == l->len ? "" : "...", "\033[0m"); 
-            }
-        }
-        if (flags.verbose)
-            print_s(0, "\n", 0);
-    }
-    UNLOCK();
-    return flags.verbose != 4; // 4: filename only
-}
-
 void usage()
 {
     printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
@@ -295,8 +197,7 @@ void usage()
     printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
     printf("\t-P\tprint results without coloring\n");
     printf("\t-G\tsearch all files regardless of .gitignore\n");
-    printf("\t-E\texclude glob patterns\n");
-    printf("\t-f\tsearch file name instead of file content\n");
+    printf("\t-E\texclude files using glob patterns\n");
     printf("\t-q/-qq\tsuppress warning/error messages\n");
     printf("\t-V/-VV\tenable log/debug messages\n");
     printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: content)\n");
@@ -325,11 +226,11 @@ int main(int argc, char **argv)
     flags.num_threads = MIN(255, sysconf(_SC_NPROCESSORS_ONLN) * 2);
     getcwd(flags.cwd, sizeof(flags.cwd));
 
-    flags.default_matcher = (struct matcher *)malloc(sizeof(struct matcher));
-    memset(flags.default_matcher, 0, sizeof(struct matcher));
-    flags.default_matcher->top = flags.default_matcher;
+    default_matcher = (struct matcher *)malloc(sizeof(struct matcher));
+    memset(default_matcher, 0, sizeof(struct matcher));
+    default_matcher->top = default_matcher;
 
-    g.callback = grep_callback;
+    g.callback = print_callback;
 
     int cop;
     opterr = 0;
@@ -351,7 +252,7 @@ int main(int argc, char **argv)
         case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
         case 'E':
                   LOG("* add exclude pattern %s\n", optarg);
-                  matcher_add_rule(flags.default_matcher, optarg, optarg + strlen(optarg), false);
+                  matcher_add_rule(default_matcher, optarg, optarg + strlen(optarg), false);
                   break;
         default: usage();
         }
@@ -406,7 +307,7 @@ int main(int argc, char **argv)
         const char *g = is_glob_path(name, name + strlen(name));
         char *joined;
         if (g) {
-            matcher_add_rule(flags.default_matcher, g, g + strlen(g), true);
+            matcher_add_rule(default_matcher, g, g + strlen(g), true);
             LOG("* add include pattern %s\n", g);
             joined = name == g ? join_path(flags.cwd, ".", 1) : join_path(flags.cwd, name, g - name);
         } else {
@@ -417,10 +318,10 @@ int main(int argc, char **argv)
             abort();
         }
         LOG("* search %s\n", joined);
-        new_task(0, joined, flags.default_matcher, is_dir(joined, true));
+        new_task(0, joined, default_matcher, is_dir(joined, true));
     }
     if (tasks.count == 0) {
-        new_task(0, strdup(flags.cwd), flags.default_matcher, true);
+        new_task(0, strdup(flags.cwd), default_matcher, true);
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
@@ -450,7 +351,7 @@ int main(int argc, char **argv)
 
 EXIT:
     grepper_free(&g);
-    matcher_free(flags.default_matcher);
+    matcher_free(default_matcher);
     pthread_mutex_destroy(&flags.lock); 
     return 0;
 }

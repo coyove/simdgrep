@@ -310,7 +310,7 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c) {
     while (s < end) {
         __m256i haystack = _mm256_loadu_si256((__m256i *)s);
         __m256i res = _mm256_cmpeq_epi8(haystack, needle);
-        count += __builtin_popcountll(_mm256_movemask_epi8(res));
+        count += __builtin_popcountll((uint32_t)_mm256_movemask_epi8(res));
         s += 32;
     }
     for (--s; s >= end; --s) {
