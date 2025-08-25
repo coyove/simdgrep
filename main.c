@@ -55,15 +55,15 @@ void push_task(uint8_t tid, struct grepfile *t)
 
 struct grepfile *pop_task(uint8_t tid)
 {
-    pthread_mutex_lock(&task_lock);
 #if 1
     struct grepfile *file = (struct grepfile *)stack_pop(tid, &tasks);
 #else
+    pthread_mutex_lock(&task_lock);
     struct grepfile *file = 0;
     if (taskqi > 0)
         file = taskq[--taskqi];
-#endif
     pthread_mutex_unlock(&task_lock);
+#endif
     return file;
 }
 
@@ -175,7 +175,7 @@ NEXT:
         } else if (res == OPEN_EMPTY) {
             // Empty file.
         } else if (res == FILL_EOF) {
-            abort(); // unreachable
+            __builtin_unreachable();
         } else if (res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
         } else if (res == FILL_OK) {
@@ -429,7 +429,8 @@ int main(int argc, char **argv)
         workers[i].actives = &actives;
         workers[i].tid = (uint8_t)i;
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
-        workers[i].chunk.buf_size = 65536;
+        workers[i].chunk.buf_size = DEFAULT_BUFFER_CAP;
+        workers[i].chunk.cap_size = DEFAULT_BUFFER_CAP;
         workers[i].chunk.buf = (char *)malloc(65600);
         pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }

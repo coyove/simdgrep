@@ -39,6 +39,8 @@
 static int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
 static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 
+#define DEFAULT_BUFFER_CAP 65536
+
 #define BINARY 0
 #define BINARY_TEXT 1
 #define BINARY_IGNORE 2
@@ -133,6 +135,7 @@ struct grepfile_chunk {
     char *buf;
     ssize_t buf_size;
     ssize_t data_size;
+    ssize_t cap_size;
     struct grepfile *file;
 };
 

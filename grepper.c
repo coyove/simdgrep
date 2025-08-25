@@ -376,6 +376,7 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 {
     const __m256i first = _mm256_set1_epi8(needle[0]);
     const __m256i last  = _mm256_set1_epi8(needle[k - 1]);
+    n -= k - 1;
     for (size_t i = 0; i < n; i += 64) {
         const __m256i block_first1 = _mm256_loadu_si256((const __m256i*)(s + i));
         const __m256i block_last1  = _mm256_loadu_si256((const __m256i*)(s + i + k - 1));
@@ -412,6 +413,7 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
     const __m256i firstlo = _mm256_set1_epi8(lo[0]), lastlo = _mm256_set1_epi8(lo[k - 1]);
     const __m256i firstup = _mm256_set1_epi8(up[0]), lastup = _mm256_set1_epi8(up[k - 1]);
 
+    n -= k - 1;
     for (size_t i = 0; i < n; i += 32) {
         const __m256i block_first1 = _mm256_loadu_si256((const __m256i*)(s + i));
         const __m256i block_last1  = _mm256_loadu_si256((const __m256i*)(s + i + k - 1));
@@ -439,94 +441,38 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
 
 #include <arm_neon.h>
 
+#define uint8x16_movemask_4bit(x) vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(x), 4)), 0);
+
 int64_t countbyte(const char *s, const char *end, uint8_t c) {
     int64_t count = 0;
-    uint32_t temp = 0;
-// #define ASM
 
-#ifdef ASM
-    // uint8x16_t needle = vdupq_n_u8(c);
-    asm volatile("dup.16b v9, %w0\n" : : "r"(c) : "memory");
-    while (s < end) {
-#endif
-    asm volatile(
-#ifndef ASM
-            "dup.16b   v9, %w4\n"
-#endif
-
-            "1:\n"
-            "ld1 { v0.16b }, [%2]\n"
-            "cmeq.16b  v0, v0, v9\n"
-            "shrn.8b   v0, v0, #0x4\n"
-            "cnt.8b    v0, v0\n"
-            "uaddlv.8b h1, v0\n"
-            "fmov      %w1, s1\n"
-            "add       %0, %0, %x1\n"
-            "add       %2, %2, #0x10\n"
-#ifndef ASM
-            "cmp       %2, %3\n"
-            "b.lt      1b\n"         // s < end
-            "lsr       %0, %0, #0x2\n" // count /= 4
-
-            "2:\n"
-            "sub       %2, %2, #0x1\n"
-            "cmp       %2, %3\n"
-            "b.lt      3f\n"         // s < end
-            "ldrb      %w1, [%2]\n"
-            "cmp       %w1, %w4\n"   // *s == c
-            "cset      %x1, eq\n"   
-            "sub       %0, %0, %x1\n" // count--
-            "b         2b\n"
-
-            "3:\n"
-#endif
-            : "+r"(count), "=r"(temp), "+r"(s), "+r"(end), "+r"(c)
-            : 
-            : "memory");
-    //     uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-    //     uint8x16_t res = vceqq_u8(haystack, needle);
-    //     uint8x8_t r = vshrn_n_u16(res, 4);
-    //     uint64_t matches = vget_lane_u64(vreinterpret_u64_u8(r), 0);
-    //     count += __builtin_popcountll(matches);
-#ifdef ASM
+    uint8x16_t needle = vdupq_n_u8(c);
+    while (s <= end - 16) {
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint64_t matches = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
+        count += __builtin_popcountll(matches);
         s += 16;
     }
-    count /= 4;
 
-            // printf("overshot %lu %lu, %lu\n", n, (uintptr_t)s , (uintptr_t)end);
-    for (--s; s >= end; --s) {
-        if (*s == c) {
-            count--;
-        }
-    }
-#endif
-    return count;
+    uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+    uint64_t matches = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
+    matches <<= (16 - (end - s)) * 4;
+    count += __builtin_popcountll(matches);
+    return count / 4;
 }
 
 const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 {
-    asm volatile(
-            "dup.16b v7, %w0\n"
-            "dup.16b v8, %w1\n"
-            :
-            : "r"(needle[0]), "r"(needle[k - 1])
-            : "memory");
-
+    uint8x16_t first8 = vdupq_n_u8(needle[0]), last8 = vdupq_n_u8(needle[k - 1]);
+    n -= k - 1;
     for (size_t i = 0; i < n; i += 16) {
-        uint64_t mask;
-        
-        asm volatile(
-                "ld1 { v0.16b }, [%1]\n" // v0 = first block
-                "ld1 { v1.16b }, [%2]\n" // v1 = last block
-                "cmeq.16b v0, v0, v7\n"
-                "cmeq.16b v1, v1, v8\n"
-                "and.16b  v0, v0, v1\n"
-                "shrn.8b  v0, v0, #0x4\n"
-                "umov %0, v0.d[0]\n"
-                : "=r"(mask)
-                : "r"(s + i), "r"(s + i + k - 1)
-                : "memory");
+        uint8x16_t first = vld1q_u8((const uint8_t *)s + i);
+        uint8x16_t last = vld1q_u8((const uint8_t *)s + i + k - 1);
 
+        first = vceqq_u8(first, first8);
+        last = vceqq_u8(last, last8);
+
+        uint64_t mask = uint8x16_movemask_4bit(vandq_s8(first, last));
         while (mask != 0) {
             int bitpos = __builtin_ctzll(mask);
             mask &= ~(0xFLLU << bitpos);
@@ -544,31 +490,33 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
 
 const char *strstr_case(const char* s, size_t n, const char *lo, const char *up, size_t k)
 {
-    asm volatile(
-            "dup.16b v6, %w0\n"
-            "dup.16b v7, %w1\n"
-            "dup.16b v8, %w2\n"
-            "dup.16b v9, %w3\n"
-            : : "r"(lo[0]), "r"(up[0]), "r"(lo[k - 1]), "r"(up[k - 1]) : "memory");
+    uint8x16_t first_lo = vdupq_n_u8(lo[0]), first_up = vdupq_n_u8(up[0]);
+    uint8x16_t last_lo = vdupq_n_u8(lo[k - 1]), last_up = vdupq_n_u8(up[k - 1]);
 
+    n -= k - 1;
     for (size_t i = 0; i < n; i += 16) {
-        uint64_t mask;
-        
-        asm volatile(
-                "ld1 { v0.16b }, [%1]\n" // v0 = first block
-                "ld1 { v1.16b }, [%2]\n" // v1 = last block
-                "cmeq.16b v2, v0, v6\n"
-                "cmeq.16b v0, v0, v7\n"
-                "orr.16b  v0, v0, v2\n" // compare first block
-                "cmeq.16b v2, v1, v8\n"
-                "cmeq.16b v1, v1, v9\n"
-                "orr.16b  v1, v1, v2\n" // compare last block
-                "and.16b  v0, v0, v1\n"
-                "shrn.8b  v0, v0, #0x4\n"
-                "umov %0, v0.d[0]\n"
-                : "=r"(mask)
-                : "r"(s + i), "r"(s + i + k - 1)
-                : "memory");
+        uint8x16_t first = vld1q_u8((const uint8_t *)s + i);
+        uint8x16_t last = vld1q_u8((const uint8_t *)s + i + k - 1);
+
+        first = vorrq_u8(vceqq_u8(first, first_lo), vceqq_u8(first, first_up));
+        last = vorrq_u8(vceqq_u8(last, last_lo), vceqq_u8(last, last_up));
+
+        uint64_t mask = uint8x16_movemask_4bit(vandq_s8(first, last));
+        // asm volatile(
+        //         "ld1 { v0.16b }, [%1]\n" // v0 = first block
+        //         "ld1 { v1.16b }, [%2]\n" // v1 = last block
+        //         "cmeq.16b v2, v0, v6\n"
+        //         "cmeq.16b v0, v0, v7\n"
+        //         "orr.16b  v0, v0, v2\n" // compare first block
+        //         "cmeq.16b v2, v1, v8\n"
+        //         "cmeq.16b v1, v1, v9\n"
+        //         "orr.16b  v1, v1, v2\n" // compare last block
+        //         "and.16b  v0, v0, v1\n"
+        //         "shrn.8b  v0, v0, #0x4\n"
+        //         "umov %0, v0.d[0]\n"
+        //         : "=r"(mask)
+        //         : "r"(s + i), "r"(s + i + k - 1)
+        //         : "memory");
 
         while (mask != 0) {
             int bitpos = __builtin_ctzll(mask);
@@ -590,9 +538,7 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a) {
 
     while (s <= end - 16) {
         uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-        uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-        uint8x8_t res = vshrn_n_u16(mask, 4);
-        uint64_t m = vreinterpret_u64_u8(res);
+        uint64_t m = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
         if (m > 0)
             return s + __builtin_ctzll(m) / 4;
         s += 16;
@@ -611,9 +557,7 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
     while (start <= s - 16) {
         s -= 16;
         uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-        uint16x8_t mask = vreinterpretq_u16_u8(vceqq_u8(haystack, needle));
-        uint8x8_t res = vshrn_n_u16(mask, 4);
-        uint64_t m = vreinterpret_u64_u8(res);
+        uint64_t m = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
         if (m > 0)
             return s + 15 - __builtin_clzll(m) / 4;
     }
@@ -736,11 +680,15 @@ void grepfile_dec_ref(struct grepfile *file)
 
 static void grepfile_chunk_grow(struct grepfile_chunk *part, size_t n)
 {
-    part->buf_size = n;
-    char *x = (char *)malloc(n + 64);
-    memcpy(x, part->buf, part->data_size);
-    free(part->buf);
-    part->buf = x;
+    if (n <= part->cap_size) {
+        part->buf_size = n;
+    } else {
+        part->buf_size = part->cap_size = n;
+        char *x = (char *)malloc(n + 64);
+        memcpy(x, part->buf, part->data_size);
+        free(part->buf);
+        part->buf = x;
+    }
 }
 
 static int _grepfile_iter_next_chunk(struct grepfile *file, struct grepfile_chunk *part)
@@ -801,6 +749,7 @@ int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
     part->prev_lines = file->lines;
     part->file = file;
     part->data_size = 0;
+    part->buf_size = DEFAULT_BUFFER_CAP;
 
     // Fill buffer.
     char *buf = part->buf;
@@ -866,10 +815,10 @@ int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chun
         return OPEN_EMPTY;
 
     int res = grepfile_acquire_chunk(file, part);
-    if (res == FILL_LAST_CHUNK) {
-    } else if (res == FILL_OK) {
+    if (res == FILL_LAST_CHUNK || res == FILL_OK) {
+        // Fill okay.
     } else if (res == FILL_EOF) {
-        abort(); // unreachable
+        __builtin_unreachable();
     } else {
         return errno;
     }
