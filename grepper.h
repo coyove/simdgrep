@@ -129,6 +129,7 @@ struct grepfile {
 
 struct grepfile_chunk {
     int64_t prev_lines;
+    size_t off;
     char *buf;
     ssize_t buf_size;
     ssize_t data_size;
