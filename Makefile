@@ -14,12 +14,9 @@ test_stack: test/test_stack.c stack.c
 sg: ${OBJS}
 	$(CC) -O3 -lpthread -o simdgrep $^
 
-static:
-	CC = musl-gcc
-	export GCC_EXEC_PREFIX=/home/coyove/go/src/github.com/coyove/openssl-musl
-
 static: ${OBJS}
-	$(CC) -O3 -lpthread -o simdgrep $^
+	export GCC_EXEC_PREFIX=/home/coyove/go/src/github.com/coyove/openssl-musl
+	musl-gcc -O3 -lpthread -o simdgrep $^
 
 %.o: %.c
 	$(CC) $(CFLAGS) -O3 -g -c $< -o $@
