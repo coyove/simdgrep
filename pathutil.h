@@ -9,13 +9,20 @@
 #include "stack.h"
 #include "wildmatch.h"
 
+typedef char *cct;
+inline void free_cct(cct *p) { free(*p); }
+#define i_key cct
+#define i_no_clone
+#define i_keydrop free_cct
+#include "STC/include/stc/vec.h"
+
 struct matcher {
     struct stacknode node;
     char *root;
     const char *file;
-    struct stack includes;
-    struct stack excludes;
-    struct stack negate_excludes;
+    vec_cct includes;
+    vec_cct excludes;
+    vec_cct negate_excludes;
     struct matcher *parent;
     struct matcher *top;
 };

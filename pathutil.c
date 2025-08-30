@@ -106,8 +106,8 @@ static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_di
 
 static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_dir)
 {
-    FOREACH_STACK(&m->negate_excludes, n) {
-        if (_matcher_wildmatch((char *)n + 8, name, is_dir))
+    for (c_each(i, vec_cct, m->top->excludes)) {
+        if (_matcher_wildmatch(*(i.ref), name, is_dir))
             return true;
     }
     if (m->parent)
@@ -121,9 +121,9 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
     if (m->root)
         name = rel_path(m->root, name);
 
-    bool incl = is_dir || m->top->includes.count == 0;
-    FOREACH_STACK(&m->top->includes, n) {
-        if (_matcher_wildmatch((char *)n + 8, name, is_dir)) {
+    bool incl = is_dir || vec_cct_size(&m->top->includes) == 0;
+    for (c_each(i, vec_cct, m->top->includes)) {
+        if (_matcher_wildmatch(*(i.ref), name, is_dir)) {
             incl = true;
             break;
         }
@@ -134,8 +134,8 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         return false;
     }
 
-    FOREACH_STACK(&m->excludes, n) {
-        char *v = (char *)n + 8;
+    for (c_each(i, vec_cct, m->top->excludes)) {
+        const char *v = *(i.ref);
         if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
                 if (reason) {
@@ -154,15 +154,15 @@ void matcher_free(void *p)
     struct matcher *m = (struct matcher *)p;
     if (m->root)
         free(m->root);
-    stack_free(&m->includes);
-    stack_free(&m->excludes);
-    stack_free(&m->negate_excludes);
+    vec_cct_drop(&m->includes);
+    vec_cct_drop(&m->excludes);
+    vec_cct_drop(&m->negate_excludes);
     free(m);
 }
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl)
 {
-    struct stack *ss = &m->excludes;
+    vec_cct *ss = &m->excludes;
     while (*(end - 1) == ' ' || *(end - 1) == '\r' || *(end - 1) == '\n')
         end--;
 
@@ -179,8 +179,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
         return false;
 
     int simple = is_glob_path(l, end) ? 0 : _ISIMPLE;
-    char *node = (char *)malloc(8 + end - l + 10);
-    char *buf = node + 8;
+    char *buf = (char *)malloc(end - l + 10);
     const char *slash = strrchr(l, '/');
     if (*(end - 1) == '/' && slash == end - 1) {
         buf[0] = simple | _IDIR; // 'abc/': match directory only
@@ -191,7 +190,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     }
     memcpy(buf + 1, l, end - l);
     buf[1 + end - l] = 0;
-    stack_push(0, incl ? &m->includes : ss, (struct stacknode *)node);
+    vec_cct_push(incl ? &m->includes : ss, buf);
     return true;
 }
 
@@ -225,7 +224,7 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
     m->root = path;
     m->file = f;
 
-    if (m->excludes.count + m->negate_excludes.count > 0)
+    if (vec_cct_size(&m->excludes) + vec_cct_size(&m->negate_excludes) > 0)
         return m;
 
     matcher_free(m);
