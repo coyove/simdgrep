@@ -32,7 +32,7 @@ bool print_callback(const struct grepline *l)
     const char *name = rel_path(flags.cwd, l->file->file->name);
     LOCK();
     if (l->file->file->status & STATUS_IS_BINARY_MATCHING) {
-        if (flags.verbose) {
+        if (flags.verbose && !l->is_ctxline) {
             printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
         }
         UNLOCK();

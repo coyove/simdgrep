@@ -393,10 +393,12 @@ int64_t countbyte(const char *s, const char *end, uint8_t c) {
         s += 16;
     }
 
-    uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
-    uint64_t matches = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
-    matches <<= (16 - (end - s)) * 4;
-    count += __builtin_popcountll(matches);
+    if (s < end) {
+        uint8x16_t haystack = vld1q_u8((const uint8_t *)s);
+        uint64_t matches = uint8x16_movemask_4bit(vceqq_u8(haystack, needle));
+        matches <<= (16 - (end - s)) * 4;
+        count += __builtin_popcountll(matches);
+    }
     return count / 4;
 }
 
@@ -629,6 +631,18 @@ void grepfile_dec_ref(struct grepfile *file)
     FILE_UNLOCK();
 }
 
+static struct grepline *_init_ctx_grepline(struct grepline *out, struct grepline in,
+        int64_t nr, const char *line, int64_t len)
+{
+    *out = in;
+    out->nr = nr;
+    out->len = len;
+    out->line = line;
+    out->match_start = out->match_end = 0;
+    out->is_ctxline = true;
+    return out;
+}
+
 static void grepfile_chunk_grow(struct grepfile_chunk *part, size_t n)
 {
     if (n <= part->cap_size) {
@@ -647,42 +661,32 @@ static int _grepfile_iter_prev_chunk(struct grepfile *file, struct grepfile_chun
     if (part->off == 0)
         return FILL_EOF;
 
-    part->data_size = MIN(DEFAULT_BUFFER_CAP, part->off);
+    size_t buf_size = part->data_size = MIN(DEFAULT_BUFFER_CAP, part->off);
+
+    // Fullfill buffer to part->data_size.
+    for (char *buf = part->buf; buf < part->buf + part->data_size; ) {
+        int n = pread(file->fd, buf, buf_size, part->off);
+        if (n < 0)
+            return errno;
+        buf += n;
+        buf_size -= n;
+    }
     part->off -= part->data_size;
-
-    // Fill buffer.
-    char *buf = part->buf;
-    size_t buf_size = part->buf_size;
-    int n, res;
-
-READ:
-    n = pread(file->fd, buf, buf_size, part->off);
-    if (n < 0)
-        return errno;
     
-    // Calc total lines.
-    if ((file->status & STATUS_IS_BINARY_MATCHING) == 0)
-        part->prev_lines += countbyte(buf, buf + n, '\n');
-
-    if (part->off + n < file->size) {
-        const char *end = indexlastbyte(buf, buf + n, '\n');
-        if (!end) {
-            // Long line exceeds the buffer size, expand buffer to read more.
-            part->data_size += n;
-            part->off += n;
-            grepfile_chunk_grow(part, part->buf_size * 3 / 2);
-            buf = part->buf + part->data_size;
-            buf_size = part->buf_size - part->data_size;
-            goto READ;
+    int res;
+    if (part->off) {
+        const char *start = indexbyte(part->buf, part->buf + part->data_size, '\n');
+        if (!start) {
+            // FIXME: Long line exceeds the buffer size, expand buffer to read more.
+            start = part->buf;
         }
         // Truncate the buffer to full lines.
-        n = end + 1 - buf;
+        part->data_size -= start - part->buf;
+        memcpy(part->buf, start, part->data_size);
         res = FILL_OK;
     } else {
         res = FILL_LAST_CHUNK;
     }
-
-    part->data_size += n;
     return res;
 }
 
@@ -845,6 +849,7 @@ int grepfile_release(struct grepfile *file)
 void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
     csview rx_match[g->rx.groups];
+    struct grepline before_lines[g->before_lines];
     struct grepfile *file = part->file;
     struct grepline gl = {
         .g = g,
@@ -903,18 +908,47 @@ NG:
             continue;
         }
 
+        if (g->before_lines) {
+            struct grepfile_chunk pp = *part;
+            const char *ss = line_start - 1;
+            int i = 0;
+            for (const char *bound = last_hit, *prev_ss = ss; i < g->before_lines; i++) {
+PREV_PREV:
+                ss = indexlastbyte(pp.buf, ss, '\n');
+                if (!ss) {
+                    int res = _grepfile_iter_prev_chunk(file, &pp);
+                    if (res == FILL_EOF || res >= 0)
+                        break;
+                    bound = pp.buf;
+                    prev_ss = ss = pp.buf + pp.data_size;
+                    goto PREV_PREV;
+                }
+                if (ss < bound)
+                    break;
+
+                int64_t len = prev_ss - (ss + 1);
+                _init_ctx_grepline(&before_lines[i], gl, gl.nr - (i + 1), strndup(ss + 1, len), len);
+                prev_ss = ss;
+            }
+            for (; i > 0; i--) {
+                g->callback(&before_lines[i - 1]);
+                free((void *)before_lines[i - 1].line);
+            }
+        }
+
+        bool exit_flag = false;
+
         if (!g->callback(&gl)) {
             FILE_LOCK();
             file->off = file->size;
             FILE_UNLOCK();
-            goto EXIT;
+            exit_flag = true;
         }
 
-        bool iter = false;
         for (int i = 0; i < g->after_lines; i++) {
             const char *ss = line_end + 1;
             if (ss >= end) {
-                iter = true;
+                exit_flag = true;
                 int res = _grepfile_iter_next_chunk(file, part);
                 if (res == FILL_EOF || res >= 0)
                     goto EXIT;
@@ -924,13 +958,10 @@ NG:
 
             line_end = indexbyte(ss, end, '\n');
             assert(line_end);
-            gl.nr++;
-            gl.line = ss;
-            gl.match_start = gl.match_end = gl.len = line_end - ss;
-            gl.is_ctxline = true;
-            g->callback(&gl);
+            g->callback(_init_ctx_grepline(&gl, gl, gl.nr + 1, ss, line_end - ss));
         }
-        if (iter)
+
+        if (exit_flag)
             goto EXIT;
 
         s = line_end + 1;

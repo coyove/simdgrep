@@ -245,6 +245,7 @@ int main(int argc, char **argv)
         case 'G': flags.no_ignore = true; break;
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
+        case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
         case 'A': g.after_lines = MAX(0, atoi(optarg)); break;
         case 'C': g.after_lines = g.before_lines = MAX(0, atoi(optarg)); break;
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
