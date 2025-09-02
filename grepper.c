@@ -16,58 +16,6 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#ifdef __cplusplus
-
-#include <iostream>
-#include <string>
-
-#if defined(__x86_64__)
-std::ostream &operator<<(std::ostream &out, const __m128i &v) {
-  const uint8_t *p = (const uint8_t *)&v;
-  out << '[';
-  for (int i = 0; i < 16; i++) {
-    out << (int)(*(p + i)) << (i == 15 ? ']' : ' ');
-  }
-  return out;
-}
-std::ostream &operator<<(std::ostream &out, const __m256i &v) {
-  const uint8_t *p = (const uint8_t *)&v;
-  out << '[';
-  for (int i = 0; i < 32; i++) {
-    out << (int)(*(p + i)) << (i == 31 ? ']' : ' ');
-  }
-  return out;
-}
-#endif
-
-#if defined(__aarch64__)
-std::ostream &operator<<(std::ostream &out, const uint8x16_t &v) {
-  const uint8_t *p = (const uint8_t *)&v;
-  out << '[';
-  for (int i = 0; i < 16; i++) {
-    out << (int)(*(p + i)) << (i == 15 ? ']' : ' ');
-  }
-  return out;
-}
-std::ostream &operator<<(std::ostream &out, const uint16x8_t &v) {
-  const uint16_t *p = (const uint16_t *)&v;
-  out << '[';
-  for (int i = 0; i < 8; i++) {
-    out << (int)(*(p + i)) << (i == 7 ? ']' : ' ');
-  }
-  return out;
-}
-std::ostream &operator<<(std::ostream &out, const uint8x8_t &v) {
-  const uint8_t *p = (const uint8_t *)&v;
-  out << '[';
-  for (int i = 0; i < 8; i++) {
-    out << (int)(*(p + i)) << (i == 7 ? ']' : ' ');
-  }
-  return out;
-}
-#endif
-#endif
-
 static int utf8casecmp(const char *a, const char *b, size_t n)
 {
     csview av = csview_from_n(a, n);
@@ -283,7 +231,10 @@ static bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_mat
     if (g->rx.use_regex) {
         const char *rx_start = g->rx.fixed_start ? s : line_start;
 
+        char tmp = *line_end;
+        *(char *)line_end = 0;
         int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match, CREG_DEFAULT);
+        *(char *)line_end = tmp;
         if (rc != CREG_OK)
             return false;
 
@@ -304,7 +255,8 @@ static bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_mat
 #include <immintrin.h>
 #include <smmintrin.h>
 
-int64_t countbyte(const char *s, const char *end, const uint8_t c) {
+int64_t countbyte(const char *s, const char *end, const uint8_t c)
+{
     __m256i needle = _mm256_set1_epi8(c);
     int64_t count = 0;
     while (s < end) {
@@ -321,7 +273,8 @@ int64_t countbyte(const char *s, const char *end, const uint8_t c) {
     return count;
 }
 
-const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
+const char *indexlastbyte(const char *start, const char *s, const uint8_t a)
+{
   __m256i needle = _mm256_set1_epi8(a);
   while (start <= s - 32) {
     s -= 32;
@@ -340,7 +293,8 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
   return 0;
 }
 
-const char *indexbyte(const char *s, const char *end, const uint8_t a) {
+const char *indexbyte(const char *s, const char *end, const uint8_t a)
+{
   __m256i needle = _mm256_set1_epi8(a);
   while (s <= end - 32) {
     __m256i haystack = _mm256_loadu_si256((__m256i *)s);
@@ -425,8 +379,6 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
 }
 
 #elif defined(__aarch64__)
-
-#include <arm_neon.h>
 
 #define uint8x16_movemask_4bit(x) vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(x), 4)), 0);
 
@@ -690,6 +642,50 @@ static void grepfile_chunk_grow(struct grepfile_chunk *part, size_t n)
     }
 }
 
+static int _grepfile_iter_prev_chunk(struct grepfile *file, struct grepfile_chunk *part)
+{
+    if (part->off == 0)
+        return FILL_EOF;
+
+    part->data_size = MIN(DEFAULT_BUFFER_CAP, part->off);
+    part->off -= part->data_size;
+
+    // Fill buffer.
+    char *buf = part->buf;
+    size_t buf_size = part->buf_size;
+    int n, res;
+
+READ:
+    n = pread(file->fd, buf, buf_size, part->off);
+    if (n < 0)
+        return errno;
+    
+    // Calc total lines.
+    if ((file->status & STATUS_IS_BINARY_MATCHING) == 0)
+        part->prev_lines += countbyte(buf, buf + n, '\n');
+
+    if (part->off + n < file->size) {
+        const char *end = indexlastbyte(buf, buf + n, '\n');
+        if (!end) {
+            // Long line exceeds the buffer size, expand buffer to read more.
+            part->data_size += n;
+            part->off += n;
+            grepfile_chunk_grow(part, part->buf_size * 3 / 2);
+            buf = part->buf + part->data_size;
+            buf_size = part->buf_size - part->data_size;
+            goto READ;
+        }
+        // Truncate the buffer to full lines.
+        n = end + 1 - buf;
+        res = FILL_OK;
+    } else {
+        res = FILL_LAST_CHUNK;
+    }
+
+    part->data_size += n;
+    return res;
+}
+
 static int _grepfile_iter_next_chunk(struct grepfile *file, struct grepfile_chunk *part)
 {
     part->off += part->data_size;
@@ -857,6 +853,9 @@ void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
         .is_ctxline = false,
     };
     const char *s = part->buf, *last_hit = part->buf, *end = part->buf + part->data_size;
+
+    // Make whole buffer a valid C string, so STC/regex can handle it properly.
+    *(char *)end = 0;
 
     while (s < end) {
         if (g->slow_rx) {
