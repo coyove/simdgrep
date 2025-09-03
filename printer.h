@@ -20,6 +20,7 @@ struct _flags {
     bool color;
     bool fixed_string;
     bool no_ignore;
+    bool no_symlink;
     int num_threads;
     int quiet;
     int xbytes;

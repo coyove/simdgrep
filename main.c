@@ -119,6 +119,10 @@ NEXT:
             memcpy(n + ln + 1, dname, strlen(dname) + 1);
             bool dir = false;
             if (dirent->d_type == DT_LNK) {
+                if (flags.no_symlink) {
+                    free(n);
+                    continue;
+                }
                 dir = is_dir(n, true);
             } else if (dirent->d_type == DT_UNKNOWN) {
                 dir = is_dir(n, false);
@@ -189,7 +193,7 @@ CONTINUE_LOOP:
 void usage()
 {
     printf("usage: simdgrep [OPTIONS]... PATTERN FILES...\n");
-    printf("PATTERN syntax is POSIX extended regex\n");
+    printf("PATTERN syntax is a dialect of POSIX extended regex\n");
     printf("FILE can contain glob patterns if you prefer simdgrep expanding it for you\n");
     printf("\te.g.: simdgrep PATTERN './dir/**/*.c'\n");
     printf("\n");
@@ -197,15 +201,18 @@ void usage()
     printf("\t-Z\tmatch case sensitively (insensitive by default)\n");
     printf("\t-P\tprint results without coloring\n");
     printf("\t-G\tsearch all files regardless of .gitignore\n");
+    printf("\t-n\tignore symlinks\n");
     printf("\t-E\texclude files using glob patterns\n");
-    printf("\t-q/-qq\tsuppress warning/error messages\n");
-    printf("\t-V/-VV\tenable log/debug messages\n");
+    printf("\t-q +/++\tsuppress warning/error messages\n");
+    printf("\t   -/--\tenable log/debug messages\n");
     printf("\t-v N\toutput format bitmap (4: filename, 2: line number, 1: content)\n");
     printf("\t\te.g.: -v5 means printing filename and matched content\n");
     printf("\t-a\ttreat binary as text\n");
     printf("\t-I\tignore binary files\n");
     printf("\t-x N\ttruncate long matched lines to N bytes to make output compact\n");
+    printf("\t-B N\tprint N lines of leading context\n");
     printf("\t-A N\tprint N lines of trailing context\n");
+    printf("\t-C N\tprint N lines of output context\n");
     printf("\t-j N\tspawn N threads for searching (1-255)\n");
     exit(0);
 }
@@ -234,15 +241,18 @@ int main(int argc, char **argv)
 
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "hfFVZPqGaIm:M:A:B:C:E:x:j:v:")) != -1) {
+    while ((cop = getopt(argc, argv, "nhfFZPGaIA:B:C:E:q:x:j:v:z:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'f': g.search_name = true; flags.verbose = 4; break;
-        case 'V': flags.quiet--; break;
         case 'Z': flags.ignore_case = false; break;
         case 'P': flags.color = false; break; 
-        case 'q': flags.quiet++; break;
+        case 'q':
+                  for (const char *q = optarg; *q; q++)
+                      *q == '+' ? flags.quiet++ : flags.quiet--;
+                  break;
         case 'G': flags.no_ignore = true; break;
+        case 'n': flags.no_symlink = true; break;
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
@@ -273,7 +283,7 @@ int main(int argc, char **argv)
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
     LOG("* print -%d+%d lines\n", g.before_lines, g.after_lines);
-    LOG("* line context %d bytes\n", flags.xbytes);
+    LOG("* print line context %d bytes\n", flags.xbytes);
 
     if (flags.fixed_string) {
         int c = grepper_init(&g, expr, flags.ignore_case);
@@ -316,7 +326,7 @@ int main(int argc, char **argv)
         }
         if (!joined) {
             ERR("can't resolve path %s", name);
-            abort();
+            exit(1);
         }
         LOG("* search %s\n", joined);
         new_task(0, joined, default_matcher, is_dir(joined, true));
