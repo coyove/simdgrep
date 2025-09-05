@@ -16,13 +16,15 @@ struct stack tasks = {0};
 struct stack matchers = {0};
 struct grepper g = {0};
 
+#ifdef SLOW_TASK
 pthread_mutex_t task_lock = PTHREAD_MUTEX_INITIALIZER;
 struct grepfile *taskq[100000];
 static int taskqi = 0;
+#endif
 
 void push_task(uint8_t tid, struct grepfile *t)
 {
-#if 1 
+#ifndef SLOW_TASK
     stack_push(tid, &tasks, (struct stacknode *)t);
 #else
     pthread_mutex_lock(&task_lock);
@@ -33,7 +35,7 @@ void push_task(uint8_t tid, struct grepfile *t)
 
 struct grepfile *pop_task(uint8_t tid)
 {
-#if 1
+#ifndef SLOW_TASK
     struct grepfile *file = (struct grepfile *)stack_pop(tid, &tasks);
 #else
     pthread_mutex_lock(&task_lock);

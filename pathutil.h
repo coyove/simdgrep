@@ -10,7 +10,7 @@
 #include "wildmatch.h"
 
 typedef char *cct;
-inline void free_cct(cct *p) { free(*p); }
+#define free_cct(p) free(*p)
 #define i_key cct
 #define i_no_clone
 #define i_keydrop free_cct

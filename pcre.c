@@ -1,46 +1,120 @@
-#include <pcre.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-
 #include "STC/include/stc/utf8.h"
 
-typedef struct real_pcre8_or_16 {
-  uint32_t magic_number;
-  uint32_t size;               /* Total that was malloced */
-  uint32_t options;            /* Public options */
-  uint32_t flags;              /* Private flags */
-  uint32_t limit_match;        /* Limit set from regex */
-  uint32_t limit_recursion;    /* Limit set from regex */
-  uint16_t first_char;         /* Starting character */
-  uint16_t req_char;           /* This character must be seen */
-  uint16_t max_lookbehind;     /* Longest lookbehind (characters) */
-  uint16_t top_bracket;        /* Highest numbered group */
-  uint16_t top_backref;        /* Highest numbered back reference */
-  uint16_t name_table_offset;  /* Offset to name table that follows */
-  uint16_t name_entry_size;    /* Size of any name items */
-  uint16_t name_count;         /* Number of name items */
-  uint16_t ref_count;          /* Reference count */
-  uint16_t dummy1;             /* To ensure size is a multiple of 8 */
-  uint16_t dummy2;             /* To ensure size is a multiple of 8 */
-  uint16_t dummy3;             /* To ensure size is a multiple of 8 */
-  const uint8_t *tables;       /* Pointer to tables or NULL for std */
-  void          *nullpad;      /* NULL padding */
-} real_pcre8_or_16;
+#include <stdio.h>
+#include <string.h>
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
 #define IMM2_SIZE 2
 #define LINK_SIZE 2
-#define GET(a,n) (((a)[n] << 8) | (a)[(n)+1])
-#define XCL_NOT       0x01    /* Flag: this is a negative class */
-#define XCL_MAP       0x02    /* Flag: a 32-byte map is present */
-#define XCL_HASPROP   0x04    /* Flag: property checks are present. */
+#define GET(a,n) (unsigned int)(((a)[n] << 8) | (a)[(n)+1])
 
-#define XCL_END       0    /* Marks end of individual items */
-#define XCL_SINGLE    1    /* Single item (one multibyte char) follows */
-#define XCL_RANGE     2    /* A range (two multibyte chars) follows */
-#define XCL_PROP      3    /* Unicode property (2-byte property code follows) */
-#define XCL_NOTPROP   4    /* Unicode inverted property (ditto) */
+#define ECL_MAP     0x01  /* Flag: a 32-byte map is present */
+
+/* Type tags for the items stored in an extended class (OP_ECLASS). These items
+follow the OP_ECLASS's flag char and bitmap, and represent a Reverse Polish
+Notation list of operands and operators manipulating a stack of bits. */
+
+#define ECL_AND     1 /* Pop two from the stack, AND, and push result. */
+#define ECL_OR      2 /* Pop two from the stack, OR, and push result. */
+#define ECL_XOR     3 /* Pop two from the stack, XOR, and push result. */
+#define ECL_NOT     4 /* Pop one from the stack, NOT, and push result. */
+#define ECL_XCLASS  5 /* XCLASS nested within ECLASS; match and push result. */
+#define ECL_ANY     6 /* Temporary, only used during compilation. */
+#define ECL_NONE    7 /* Temporary, only used during compilation. */
+
+#define OP_LENGTHS \
+  1,                             /* End                                    */ \
+  1, 1, 1, 1, 1,                 /* \A, \G, \K, \B, \b                     */ \
+  1, 1, 1, 1, 1, 1,              /* \D, \d, \S, \s, \W, \w                 */ \
+  1, 1, 1,                       /* Any, AllAny, Anybyte                   */ \
+  3, 3,                          /* \P, \p                                 */ \
+  1, 1, 1, 1, 1,                 /* \R, \H, \h, \V, \v                     */ \
+  1,                             /* \X                                     */ \
+  1, 1, 1, 1, 1, 1,              /* \Z, \z, $, $M ^, ^M                    */ \
+  2,                             /* Char  - the minimum length             */ \
+  2,                             /* Chari  - the minimum length            */ \
+  2,                             /* not                                    */ \
+  2,                             /* noti                                   */ \
+  /* Positive single-char repeats                             ** These are */ \
+  2, 2, 2, 2, 2, 2,              /* *, *?, +, +?, ?, ??       ** minima in */ \
+  2+IMM2_SIZE, 2+IMM2_SIZE,      /* upto, minupto             ** mode      */ \
+  2+IMM2_SIZE,                   /* exact                                  */ \
+  2, 2, 2, 2+IMM2_SIZE,          /* *+, ++, ?+, upto+                      */ \
+  2, 2, 2, 2, 2, 2,              /* *I, *?I, +I, +?I, ?I, ??I ** UTF-8     */ \
+  2+IMM2_SIZE, 2+IMM2_SIZE,      /* upto I, minupto I                      */ \
+  2+IMM2_SIZE,                   /* exact I                                */ \
+  2, 2, 2, 2+IMM2_SIZE,          /* *+I, ++I, ?+I, upto+I                  */ \
+  /* Negative single-char repeats - only for chars < 256                   */ \
+  2, 2, 2, 2, 2, 2,              /* NOT *, *?, +, +?, ?, ??                */ \
+  2+IMM2_SIZE, 2+IMM2_SIZE,      /* NOT upto, minupto                      */ \
+  2+IMM2_SIZE,                   /* NOT exact                              */ \
+  2, 2, 2, 2+IMM2_SIZE,          /* Possessive NOT *, +, ?, upto           */ \
+  2, 2, 2, 2, 2, 2,              /* NOT *I, *?I, +I, +?I, ?I, ??I          */ \
+  2+IMM2_SIZE, 2+IMM2_SIZE,      /* NOT upto I, minupto I                  */ \
+  2+IMM2_SIZE,                   /* NOT exact I                            */ \
+  2, 2, 2, 2+IMM2_SIZE,          /* Possessive NOT *I, +I, ?I, upto I      */ \
+  /* Positive type repeats                                                 */ \
+  2, 2, 2, 2, 2, 2,              /* Type *, *?, +, +?, ?, ??               */ \
+  2+IMM2_SIZE, 2+IMM2_SIZE,      /* Type upto, minupto                     */ \
+  2+IMM2_SIZE,                   /* Type exact                             */ \
+  2, 2, 2, 2+IMM2_SIZE,          /* Possessive *+, ++, ?+, upto+           */ \
+  /* Character class & ref repeats                                         */ \
+  1, 1, 1, 1, 1, 1,              /* *, *?, +, +?, ?, ??                    */ \
+  1+2*IMM2_SIZE, 1+2*IMM2_SIZE,  /* CRRANGE, CRMINRANGE                    */ \
+  1, 1, 1, 1+2*IMM2_SIZE,        /* Possessive *+, ++, ?+, CRPOSRANGE      */ \
+  1+(32),    /* CLASS                                  */ \
+  1+(32),    /* NCLASS                                 */ \
+  0,                             /* XCLASS - variable length               */ \
+  0,                             /* ECLASS - variable length               */ \
+  1+IMM2_SIZE,                   /* REF                                    */ \
+  1+IMM2_SIZE+1,                 /* REFI                                   */ \
+  1+2*IMM2_SIZE,                 /* DNREF                                  */ \
+  1+2*IMM2_SIZE+1,               /* DNREFI                                 */ \
+  1+LINK_SIZE,                   /* RECURSE                                */ \
+  1+2*LINK_SIZE+1,               /* CALLOUT                                */ \
+  0,                             /* CALLOUT_STR - variable length          */ \
+  1+LINK_SIZE,                   /* Alt                                    */ \
+  1+LINK_SIZE,                   /* Ket                                    */ \
+  1+LINK_SIZE,                   /* KetRmax                                */ \
+  1+LINK_SIZE,                   /* KetRmin                                */ \
+  1+LINK_SIZE,                   /* KetRpos                                */ \
+  1+IMM2_SIZE,                   /* Reverse                                */ \
+  1+2*IMM2_SIZE,                 /* VReverse                               */ \
+  1+LINK_SIZE,                   /* Assert                                 */ \
+  1+LINK_SIZE,                   /* Assert not                             */ \
+  1+LINK_SIZE,                   /* Assert behind                          */ \
+  1+LINK_SIZE,                   /* Assert behind not                      */ \
+  1+LINK_SIZE,                   /* NA Assert                              */ \
+  1+LINK_SIZE,                   /* NA Assert behind                       */ \
+  1+LINK_SIZE,                   /* Scan substring                         */ \
+  1+LINK_SIZE,                   /* ONCE                                   */ \
+  1+LINK_SIZE,                   /* SCRIPT_RUN                             */ \
+  1+LINK_SIZE,                   /* BRA                                    */ \
+  1+LINK_SIZE,                   /* BRAPOS                                 */ \
+  1+LINK_SIZE+IMM2_SIZE,         /* CBRA                                   */ \
+  1+LINK_SIZE+IMM2_SIZE,         /* CBRAPOS                                */ \
+  1+LINK_SIZE,                   /* COND                                   */ \
+  1+LINK_SIZE,                   /* SBRA                                   */ \
+  1+LINK_SIZE,                   /* SBRAPOS                                */ \
+  1+LINK_SIZE+IMM2_SIZE,         /* SCBRA                                  */ \
+  1+LINK_SIZE+IMM2_SIZE,         /* SCBRAPOS                               */ \
+  1+LINK_SIZE,                   /* SCOND                                  */ \
+  1+IMM2_SIZE, 1+2*IMM2_SIZE,    /* CREF, DNCREF                           */ \
+  1+IMM2_SIZE, 1+2*IMM2_SIZE,    /* RREF, DNRREF                           */ \
+  1, 1,                          /* FALSE, TRUE                            */ \
+  1, 1, 1,                       /* BRAZERO, BRAMINZERO, BRAPOSZERO        */ \
+  3, 1, 3,                       /* MARK, PRUNE, PRUNE_ARG                 */ \
+  1, 3,                          /* SKIP, SKIP_ARG                         */ \
+  1, 3,                          /* THEN, THEN_ARG                         */ \
+  1, 3,                          /* COMMIT, COMMIT_ARG                     */ \
+  1, 1, 1,                       /* FAIL, ACCEPT, ASSERT_ACCEPT            */ \
+  1+IMM2_SIZE, 1,                /* CLOSE, SKIPZERO                        */ \
+  1,                             /* DEFINE                                 */ \
+  1, 1                           /* \B and \b in UCP mode                  */
+
+const uint8_t OP_lengths[] = { OP_LENGTHS };
 
 enum {
   OP_END,            /* 0 End of pattern */
@@ -50,8 +124,8 @@ enum {
   OP_SOD,            /* 1 Start of data: \A */
   OP_SOM,            /* 2 Start of match (subject + offset): \G */
   OP_SET_SOM,        /* 3 Set start of match (\K) */
-  OP_NOT_WORD_BOUNDARY,  /*  4 \B */
-  OP_WORD_BOUNDARY,      /*  5 \b */
+  OP_NOT_WORD_BOUNDARY,  /*  4 \B -- see also OP_NOT_UCP_WORD_BOUNDARY */
+  OP_WORD_BOUNDARY,      /*  5 \b -- see also OP_UCP_WORD_BOUNDARY */
   OP_NOT_DIGIT,          /*  6 \D */
   OP_DIGIT,              /*  7 \d */
   OP_NOT_WHITESPACE,     /*  8 \S */
@@ -80,7 +154,8 @@ enum {
   OP_CIRC,           /* 27 Start of line - not multiline */
   OP_CIRCM,          /* 28 Start of line - multiline */
 
-  /* Single characters; caseful must precede the caseless ones */
+  /* Single characters; caseful must precede the caseless ones, and these
+  must remain in this order, and adjacent. */
 
   OP_CHAR,           /* 29 Match one character, casefully */
   OP_CHARI,          /* 30 Match one character, caselessly */
@@ -207,304 +282,363 @@ enum {
                               character > 255 is encountered. */
   OP_XCLASS,         /* 112 Extended class for handling > 255 chars within the
                               class. This does both positive and negative. */
-  OP_REF,            /* 113 Match a back reference, casefully */
-  OP_REFI,           /* 114 Match a back reference, caselessly */
-  OP_DNREF,          /* 115 Match a duplicate name backref, casefully */
-  OP_DNREFI,         /* 116 Match a duplicate name backref, caselessly */
-  OP_RECURSE,        /* 117 Match a numbered subpattern (possibly recursive) */
-  OP_CALLOUT,        /* 118 Call out to external function if provided */
+  OP_ECLASS,         /* 113 Really-extended class, for handling logical
+                              expressions computed over characters. */
+  OP_REF,            /* 114 Match a back reference, casefully */
+  OP_REFI,           /* 115 Match a back reference, caselessly */
+  OP_DNREF,          /* 116 Match a duplicate name backref, casefully */
+  OP_DNREFI,         /* 117 Match a duplicate name backref, caselessly */
+  OP_RECURSE,        /* 118 Match a numbered subpattern (possibly recursive) */
+  OP_CALLOUT,        /* 119 Call out to external function if provided */
+  OP_CALLOUT_STR,    /* 120 Call out with string argument */
 
-  OP_ALT,            /* 119 Start of alternation */
-  OP_KET,            /* 120 End of group that doesn't have an unbounded repeat */
-  OP_KETRMAX,        /* 121 These two must remain together and in this */
-  OP_KETRMIN,        /* 122 order. They are for groups the repeat for ever. */
-  OP_KETRPOS,        /* 123 Possessive unlimited repeat. */
+  OP_ALT,            /* 121 Start of alternation */
+  OP_KET,            /* 122 End of group that doesn't have an unbounded repeat */
+  OP_KETRMAX,        /* 123 These two must remain together and in this */
+  OP_KETRMIN,        /* 124 order. They are for groups the repeat for ever. */
+  OP_KETRPOS,        /* 125 Possessive unlimited repeat. */
 
-  /* The assertions must come before BRA, CBRA, ONCE, and COND, and the four
-  asserts must remain in order. */
+  /* The assertions must come before BRA, CBRA, ONCE, and COND. */
 
-  OP_REVERSE,        /* 124 Move pointer back - used in lookbehind assertions */
-  OP_ASSERT,         /* 125 Positive lookahead */
-  OP_ASSERT_NOT,     /* 126 Negative lookahead */
-  OP_ASSERTBACK,     /* 127 Positive lookbehind */
-  OP_ASSERTBACK_NOT, /* 128 Negative lookbehind */
+  OP_REVERSE,        /* 126 Move pointer back - used in lookbehind assertions */
+  OP_VREVERSE,       /* 127 Move pointer back - variable */
+  OP_ASSERT,         /* 128 Positive lookahead */
+  OP_ASSERT_NOT,     /* 129 Negative lookahead */
+  OP_ASSERTBACK,     /* 130 Positive lookbehind */
+  OP_ASSERTBACK_NOT, /* 131 Negative lookbehind */
+  OP_ASSERT_NA,      /* 132 Positive non-atomic lookahead */
+  OP_ASSERTBACK_NA,  /* 133 Positive non-atomic lookbehind */
+  OP_ASSERT_SCS,     /* 134 Scan substring */
 
-  /* ONCE, ONCE_NC, BRA, BRAPOS, CBRA, CBRAPOS, and COND must come immediately
-  after the assertions, with ONCE first, as there's a test for >= ONCE for a
-  subpattern that isn't an assertion. The POS versions must immediately follow
-  the non-POS versions in each case. */
+  /* ONCE, SCRIPT_RUN, BRA, BRAPOS, CBRA, CBRAPOS, and COND must come
+  immediately after the assertions, with ONCE first, as there's a test for >=
+  ONCE for a subpattern that isn't an assertion. The POS versions must
+  immediately follow the non-POS versions in each case. */
 
-  OP_ONCE,           /* 129 Atomic group, contains captures */
-  OP_ONCE_NC,        /* 130 Atomic group containing no captures */
-  OP_BRA,            /* 131 Start of non-capturing bracket */
-  OP_BRAPOS,         /* 132 Ditto, with unlimited, possessive repeat */
-  OP_CBRA,           /* 133 Start of capturing bracket */
-  OP_CBRAPOS,        /* 134 Ditto, with unlimited, possessive repeat */
-  OP_COND,           /* 135 Conditional group */
+  OP_ONCE,           /* 135 Atomic group, contains captures */
+  OP_SCRIPT_RUN,     /* 136 Non-capture, but check characters' scripts */
+  OP_BRA,            /* 137 Start of non-capturing bracket */
+  OP_BRAPOS,         /* 138 Ditto, with unlimited, possessive repeat */
+  OP_CBRA,           /* 139 Start of capturing bracket */
+  OP_CBRAPOS,        /* 140 Ditto, with unlimited, possessive repeat */
+  OP_COND,           /* 141 Conditional group */
 
   /* These five must follow the previous five, in the same order. There's a
   check for >= SBRA to distinguish the two sets. */
 
-  OP_SBRA,           /* 136 Start of non-capturing bracket, check empty  */
-  OP_SBRAPOS,        /* 137 Ditto, with unlimited, possessive repeat */
-  OP_SCBRA,          /* 138 Start of capturing bracket, check empty */
-  OP_SCBRAPOS,       /* 139 Ditto, with unlimited, possessive repeat */
-  OP_SCOND,          /* 140 Conditional group, check empty */
+  OP_SBRA,           /* 142 Start of non-capturing bracket, check empty  */
+  OP_SBRAPOS,        /* 143 Ditto, with unlimited, possessive repeat */
+  OP_SCBRA,          /* 144 Start of capturing bracket, check empty */
+  OP_SCBRAPOS,       /* 145 Ditto, with unlimited, possessive repeat */
+  OP_SCOND,          /* 146 Conditional group, check empty */
 
   /* The next two pairs must (respectively) be kept together. */
 
-  OP_CREF,           /* 141 Used to hold a capture number as condition */
-  OP_DNCREF,         /* 142 Used to point to duplicate names as a condition */
-  OP_RREF,           /* 143 Used to hold a recursion number as condition */
-  OP_DNRREF,         /* 144 Used to point to duplicate names as a condition */
-  OP_DEF,            /* 145 The DEFINE condition */
+  OP_CREF,           /* 147 Used to hold a capture number as condition */
+  OP_DNCREF,         /* 148 Used to point to duplicate names as a condition */
+  OP_RREF,           /* 149 Used to hold a recursion number as condition */
+  OP_DNRREF,         /* 150 Used to point to duplicate names as a condition */
+  OP_FALSE,          /* 151 Always false (used by DEFINE and VERSION) */
+  OP_TRUE,           /* 152 Always true (used by VERSION) */
 
-  OP_BRAZERO,        /* 146 These two must remain together and in this */
-  OP_BRAMINZERO,     /* 147 order. */
-  OP_BRAPOSZERO,     /* 148 */
+  OP_BRAZERO,        /* 153 These two must remain together and in this */
+  OP_BRAMINZERO,     /* 154 order. */
+  OP_BRAPOSZERO,     /* 155 */
 
   /* These are backtracking control verbs */
 
-  OP_MARK,           /* 149 always has an argument */
-  OP_PRUNE,          /* 150 */
-  OP_PRUNE_ARG,      /* 151 same, but with argument */
-  OP_SKIP,           /* 152 */
-  OP_SKIP_ARG,       /* 153 same, but with argument */
-  OP_THEN,           /* 154 */
-  OP_THEN_ARG,       /* 155 same, but with argument */
-  OP_COMMIT,         /* 156 */
+  OP_MARK,           /* 156 always has an argument */
+  OP_PRUNE,          /* 157 */
+  OP_PRUNE_ARG,      /* 158 same, but with argument */
+  OP_SKIP,           /* 159 */
+  OP_SKIP_ARG,       /* 160 same, but with argument */
+  OP_THEN,           /* 161 */
+  OP_THEN_ARG,       /* 162 same, but with argument */
+  OP_COMMIT,         /* 163 */
+  OP_COMMIT_ARG,     /* 164 same, but with argument */
 
-  /* These are forced failure and success verbs */
+  /* These are forced failure and success verbs. FAIL and ACCEPT do accept an
+  argument, but these cases can be compiled as, for example, (*MARK:X)(*FAIL)
+  without the need for a special opcode. */
 
-  OP_FAIL,           /* 157 */
-  OP_ACCEPT,         /* 158 */
-  OP_ASSERT_ACCEPT,  /* 159 Used inside assertions */
-  OP_CLOSE,          /* 160 Used before OP_ACCEPT to close open captures */
+  OP_FAIL,           /* 165 */
+  OP_ACCEPT,         /* 166 */
+  OP_ASSERT_ACCEPT,  /* 167 Used inside assertions */
+  OP_CLOSE,          /* 168 Used before OP_ACCEPT to close open captures */
 
   /* This is used to skip a subpattern with a {0} quantifier */
 
-  OP_SKIPZERO,       /* 161 */
+  OP_SKIPZERO,       /* 169 */
+
+  /* This is used to identify a DEFINE group during compilation so that it can
+  be checked for having only one branch. It is changed to OP_FALSE before
+  compilation finishes. */
+
+  OP_DEFINE,         /* 170 */
+
+  /* These opcodes replace their normal counterparts in UCP mode when
+  PCRE2_EXTRA_ASCII_BSW is not set. */
+
+  OP_NOT_UCP_WORD_BOUNDARY, /* 171 */
+  OP_UCP_WORD_BOUNDARY,     /* 172 */
 
   /* This is not an opcode, but is used to check that tables indexed by opcode
   are the correct length, in order to catch updating errors - there have been
   some in the past. */
 
   OP_TABLE_LENGTH
+
 };
 
-static const uint8_t priv_OP_lengths[] = {
-  1,                             /* End                                    */ 
-  1, 1, 1, 1, 1,                 /* \A, \G, \K, \B, \b                     */ 
-  1, 1, 1, 1, 1, 1,              /* \D, \d, \S, \s, \W, \w                 */ 
-  1, 1, 1,                       /* Any, AllAny, Anybyte                   */ 
-  3, 3,                          /* \P, \p                                 */ 
-  1, 1, 1, 1, 1,                 /* \R, \H, \h, \V, \v                     */ 
-  1,                             /* \X                                     */ 
-  1, 1, 1, 1, 1, 1,              /* \Z, \z, $, $M ^, ^M                    */ 
-  2,                             /* Char  - the minimum length             */ 
-  2,                             /* Chari  - the minimum length            */ 
-  2,                             /* not                                    */ 
-  2,                             /* noti                                   */ 
-  /* Positive single-char repeats                             ** These are */ 
-  2, 2, 2, 2, 2, 2,              /* *, *?, +, +?, ?, ??       ** minima in */ 
-  2+IMM2_SIZE, 2+IMM2_SIZE,      /* upto, minupto             ** mode      */ 
-  2+IMM2_SIZE,                   /* exact                                  */ 
-  2, 2, 2, 2+IMM2_SIZE,          /* *+, ++, ?+, upto+                      */ 
-  2, 2, 2, 2, 2, 2,              /* *I, *?I, +I, +?I, ?I, ??I ** UTF-8     */ 
-  2+IMM2_SIZE, 2+IMM2_SIZE,      /* upto I, minupto I                      */ 
-  2+IMM2_SIZE,                   /* exact I                                */ 
-  2, 2, 2, 2+IMM2_SIZE,          /* *+I, ++I, ?+I, upto+I                  */ 
-  /* Negative single-char repeats - only for chars < 256                   */ 
-  2, 2, 2, 2, 2, 2,              /* NOT *, *?, +, +?, ?, ??                */ 
-  2+IMM2_SIZE, 2+IMM2_SIZE,      /* NOT upto, minupto                      */ 
-  2+IMM2_SIZE,                   /* NOT exact                              */ 
-  2, 2, 2, 2+IMM2_SIZE,          /* Possessive NOT *, +, ?, upto           */ 
-  2, 2, 2, 2, 2, 2,              /* NOT *I, *?I, +I, +?I, ?I, ??I          */ 
-  2+IMM2_SIZE, 2+IMM2_SIZE,      /* NOT upto I, minupto I                  */ 
-  2+IMM2_SIZE,                   /* NOT exact I                            */ 
-  2, 2, 2, 2+IMM2_SIZE,          /* Possessive NOT *I, +I, ?I, upto I      */ 
-  /* Positive type repeats                                                 */ 
-  2, 2, 2, 2, 2, 2,              /* Type *, *?, +, +?, ?, ??               */ 
-  2+IMM2_SIZE, 2+IMM2_SIZE,      /* Type upto, minupto                     */ 
-  2+IMM2_SIZE,                   /* Type exact                             */ 
-  2, 2, 2, 2+IMM2_SIZE,          /* Possessive *+, ++, ?+, upto+           */ 
-  /* Character class & ref repeats                                         */ 
-  1, 1, 1, 1, 1, 1,              /* *, *?, +, +?, ?, ??                    */ 
-  1+2*IMM2_SIZE, 1+2*IMM2_SIZE,  /* CRRANGE, CRMINRANGE                    */ 
-  1, 1, 1, 1+2*IMM2_SIZE,        /* Possessive *+, ++, ?+, CRPOSRANGE      */ 
-  1+(32/1),     /* CLASS                                  */ 
-  1+(32/1),     /* NCLASS                                 */ 
-  0,                             /* XCLASS - variable length               */ 
-  1+IMM2_SIZE,                   /* REF                                    */ 
-  1+IMM2_SIZE,                   /* REFI                                   */ 
-  1+2*IMM2_SIZE,                 /* DNREF                                  */ 
-  1+2*IMM2_SIZE,                 /* DNREFI                                 */ 
-  1+LINK_SIZE,                   /* RECURSE                                */ 
-  2+2*LINK_SIZE,                 /* CALLOUT                                */ 
-  1+LINK_SIZE,                   /* Alt                                    */ 
-  1+LINK_SIZE,                   /* Ket                                    */ 
-  1+LINK_SIZE,                   /* KetRmax                                */ 
-  1+LINK_SIZE,                   /* KetRmin                                */ 
-  1+LINK_SIZE,                   /* KetRpos                                */ 
-  1+LINK_SIZE,                   /* Reverse                                */ 
-  1+LINK_SIZE,                   /* Assert                                 */ 
-  1+LINK_SIZE,                   /* Assert not                             */ 
-  1+LINK_SIZE,                   /* Assert behind                          */ 
-  1+LINK_SIZE,                   /* Assert behind not                      */ 
-  1+LINK_SIZE,                   /* ONCE                                   */ 
-  1+LINK_SIZE,                   /* ONCE_NC                                */ 
-  1+LINK_SIZE,                   /* BRA                                    */ 
-  1+LINK_SIZE,                   /* BRAPOS                                 */ 
-  1+LINK_SIZE+IMM2_SIZE,         /* CBRA                                   */ 
-  1+LINK_SIZE+IMM2_SIZE,         /* CBRAPOS                                */ 
-  1+LINK_SIZE,                   /* COND                                   */ 
-  1+LINK_SIZE,                   /* SBRA                                   */ 
-  1+LINK_SIZE,                   /* SBRAPOS                                */ 
-  1+LINK_SIZE+IMM2_SIZE,         /* SCBRA                                  */ 
-  1+LINK_SIZE+IMM2_SIZE,         /* SCBRAPOS                               */ 
-  1+LINK_SIZE,                   /* SCOND                                  */ 
-  1+IMM2_SIZE, 1+2*IMM2_SIZE,    /* CREF, DNCREF                           */ 
-  1+IMM2_SIZE, 1+2*IMM2_SIZE,    /* RREF, DNRREF                           */ 
-  1,                             /* DEF                                    */ 
-  1, 1, 1,                       /* BRAZERO, BRAMINZERO, BRAPOSZERO        */ 
-  3, 1, 3,                       /* MARK, PRUNE, PRUNE_ARG                 */ 
-  1, 3,                          /* SKIP, SKIP_ARG                         */ 
-  1, 3,                          /* THEN, THEN_ARG                         */ 
-  1, 1, 1, 1,                    /* COMMIT, FAIL, ACCEPT, ASSERT_ACCEPT    */ 
-  1+IMM2_SIZE, 1                 /* CLOSE, SKIPZERO                        */
-};
+typedef struct pcre2_memctl {
+    void *    (*malloc)(size_t, void *);
+    void      (*free)(void *, void *);
+    void      *memory_data;
+} pcre2_memctl;
 
-static unsigned int print_char(const uint8_t *ptr) {
+typedef struct pcre2_real_code {
+    pcre2_memctl memctl;            /* Memory control fields */
+    const uint8_t *tables;          /* The character tables */
+    void    *executable_jit;        /* Pointer to JIT code */
+    uint8_t  start_bitmap[32];      /* Bitmap for starting code unit < 256 */
+    size_t blocksize;  /* Total (bytes) that was malloc-ed */
+    size_t code_start; /* Byte code start offset */
+    uint32_t magic_number;          /* Paranoid and endianness check */
+    uint32_t compile_options;       /* Options passed to pcre2_compile() */
+    uint32_t overall_options;       /* Options after processing the pattern */
+    uint32_t extra_options;         /* Taken from compile_context */
+    uint32_t flags;                 /* Various state flags */
+    uint32_t limit_heap;            /* Limit set in the pattern */
+    uint32_t limit_match;           /* Limit set in the pattern */
+    uint32_t limit_depth;           /* Limit set in the pattern */
+    uint32_t first_codeunit;        /* Starting code unit */
+    uint32_t last_codeunit;         /* This codeunit must be seen */
+    uint16_t bsr_convention;        /* What \R matches */
+    uint16_t newline_convention;    /* What is a newline? */
+    uint16_t max_lookbehind;        /* Longest lookbehind (characters) */
+    uint16_t minlength;             /* Minimum length of match */
+    uint16_t top_bracket;           /* Highest numbered group */
+    uint16_t top_backref;           /* Highest numbered back reference */
+    uint16_t name_entry_size;       /* Size (code units) of table entries */
+    uint16_t name_count;            /* Number of name entries in the table */
+    uint32_t optimization_flags;    /* Optimizations enabled at compile time */
+} pcre2_real_code;
+
+int char_width(PCRE2_SPTR data)
+{
     utf8_decode_t d = {.state=0};
-    int n = utf8_decode_codepoint(&d, (const char *)ptr, NULL);
-    printf("n=%d\n", n);
+    int n = utf8_decode_codepoint(&d, (const char *)data, NULL);
     return n - 1;
 }
 
-int main(void) {
-    const char *error;
-    int erroffset;
-    int ovector[30];   // output vector for substring matches
-    int rc;
-
-    const char *pattern = "([a-z]+)zz b这种1 (\\d+)";
-    const char *subject = "apple 123";
-
-    // Compile the regex
-    pcre *re = pcre_compile(
-        pattern,            // the pattern
-        PCRE_UTF8,                  // options (0 = default)
-        &error,             // error message (if compilation fails)
-        &erroffset,         // error offset in pattern
-        NULL                // use default character tables
-    );
-
-    if (re == NULL) {
-        printf("PCRE compilation failed at offset %d: %s\n", erroffset, error);
-        return 1;
+int ccode_width(int c)
+{
+    switch(c) {
+        case OP_CRSTAR:
+        case OP_CRMINSTAR:
+        case OP_CRPLUS:
+        case OP_CRMINPLUS:
+        case OP_CRQUERY:
+        case OP_CRMINQUERY:
+        case OP_CRPOSSTAR:
+        case OP_CRPOSPLUS:
+        case OP_CRPOSQUERY:
+        case OP_CRRANGE:
+        case OP_CRMINRANGE:
+        case OP_CRPOSRANGE:
+            return OP_lengths[c];
     }
+    return 0;
+}
 
-    const uint8_t *codestart, *code;
-    int offset = re->name_table_offset;
-    int count = re->name_count;
-    int size = re->name_entry_size;
-    code = codestart = (const uint8_t *)re + offset + count * size;
+int main(void) {
+    // Pattern: one or more word characters
+    PCRE2_SPTR pattern = (PCRE2_SPTR)"zz(a|b|[cd]+)";
+    PCRE2_SPTR subject = (PCRE2_SPTR)"Hello 123 World";
 
-    for(;;) {
-        const uint8_t *ccode;
+    int errornumber;
+    PCRE2_SIZE erroroffset;
+    pcre2_code *re;
+
+    // Compile the regular expression
+    re = pcre2_compile(
+            pattern,               // pattern
+            PCRE2_ZERO_TERMINATED, // pattern length
+            PCRE2_UTF,                     // options
+            &errornumber,          // for error code
+            &erroroffset,          // for error offset
+            NULL                   // use default compile context
+            );
+
+    PCRE2_SPTR codestart, code;
+    int depth = 0;
+    code = codestart = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
+
+    for (;;) {
+        PCRE2_SPTR ccode;
+        uint32_t c;
         unsigned int extra = 0;
 
-        printf("%d > %d\n", *code, code - codestart);
-        switch(*code) {
+        printf("a=%d, depth=%d\n", *code, depth);
+        switch (*code) {
             case OP_END:
-                printf("exit");
+                printf("end\n");
                 exit(1);
 
             case OP_CHAR:
-                do
+            case OP_CHARI:
                 {
-                    code++;
-                    code += 1 + print_char(code);
+                    int op = *code;
+                    do {
+                        code++;
+                        int n = char_width(code) + 1;
+                        printf("[%.*s]", n, code);
+                        code += n;
+                    } while (*code == op);
                 }
-                while (*code == OP_CHAR);
                 continue;
 
-            case OP_CHARI:
-                do
-                {
-                    code++;
-                    code += 1 + print_char(code);
-                }
-                while (*code == OP_CHARI);
-                continue;
+            case OP_BRA:
+            case OP_BRAPOS:
+            case OP_CBRA:
+            case OP_CBRAPOS:
+            case OP_COND:
+            case OP_SBRA:
+            case OP_SBRAPOS:
+            case OP_SCBRA:
+            case OP_SCBRAPOS:
+            case OP_SCOND:
+            case OP_BRAZERO:
+            case OP_BRAMINZERO:
+            case OP_BRAPOSZERO:
+                depth++;
+                break;
+
+            case OP_KET:
+            case OP_KETRMAX:
+            case OP_KETRMIN:
+            case OP_KETRPOS:
+                depth--;
+                break;
+
+            case OP_POSSTARI:
+            case OP_PLUSI:
+            case OP_MINPLUSI:
+            case OP_POSPLUSI:
+            case OP_QUERYI:
+            case OP_MINQUERYI:
+            case OP_POSQUERYI:
+            case OP_STAR:
+            case OP_MINSTAR:
+            case OP_POSSTAR:
+            case OP_PLUS:
+            case OP_MINPLUS:
+            case OP_POSPLUS:
+            case OP_QUERY:
+            case OP_MINQUERY:
+            case OP_POSQUERY:
+                extra = char_width(code+1);
+                break;
+
+            case OP_TYPESTAR:
+            case OP_TYPEMINSTAR:
+            case OP_TYPEPOSSTAR:
+            case OP_TYPEPLUS:
+            case OP_TYPEMINPLUS:
+            case OP_TYPEPOSPLUS:
+            case OP_TYPEQUERY:
+            case OP_TYPEMINQUERY:
+            case OP_TYPEPOSQUERY:
+                if (code[1] == OP_PROP || code[1] == OP_NOTPROP)
+                    extra = 2;
+                break;
+
+            case OP_EXACTI:
+            case OP_UPTOI:
+            case OP_MINUPTOI:
+            case OP_POSUPTOI:
+            case OP_EXACT:
+            case OP_UPTO:
+            case OP_MINUPTO:
+            case OP_POSUPTO:
+                extra = char_width(code + 1 + IMM2_SIZE);
+                break;
+
+            case OP_TYPEEXACT:
+            case OP_TYPEUPTO:
+            case OP_TYPEMINUPTO:
+            case OP_TYPEPOSUPTO:
+                if (code[1 + IMM2_SIZE] == OP_PROP || code[1 + IMM2_SIZE] == OP_NOTPROP)
+                    extra = 2;
+                break;
+
+            case OP_NOTI:
+            case OP_NOT:
+            case OP_NOTSTARI:
+            case OP_NOTMINSTARI:
+            case OP_NOTPOSSTARI:
+            case OP_NOTPLUSI:
+            case OP_NOTMINPLUSI:
+            case OP_NOTPOSPLUSI:
+            case OP_NOTQUERYI:
+            case OP_NOTMINQUERYI:
+            case OP_NOTPOSQUERYI:
+            case OP_NOTSTAR:
+            case OP_NOTMINSTAR:
+            case OP_NOTPOSSTAR:
+            case OP_NOTPLUS:
+            case OP_NOTMINPLUS:
+            case OP_NOTPOSPLUS:
+            case OP_NOTQUERY:
+            case OP_NOTMINQUERY:
+            case OP_NOTPOSQUERY:
+                extra = char_width(code + 1);
+                break;
+
+            case OP_NOTEXACTI:
+            case OP_NOTUPTOI:
+            case OP_NOTMINUPTOI:
+            case OP_NOTPOSUPTOI:
+            case OP_NOTEXACT:
+            case OP_NOTUPTO:
+            case OP_NOTMINUPTO:
+            case OP_NOTPOSUPTO:
+                extra = char_width(code + 1 + IMM2_SIZE);
+                break;
 
             case OP_REFI:
             case OP_REF:
             case OP_DNREFI:
             case OP_DNREF:
-                ccode = code + priv_OP_lengths[*code];
-                goto CLASS_REF_REPEAT;
+                ccode = code + OP_lengths[*code];
+                extra += ccode_width(*ccode);
+                break;
 
+            case OP_CALLOUT_STR:
+                extra = GET(code, 1 + 2*LINK_SIZE);
+                break;
+
+            case OP_ECLASS:
+                extra = GET(code, 1);
+                ccode = code + 1 + LINK_SIZE + 1;
+                if ((ccode[-1] & ECL_MAP) != 0)
+                    ccode += 32;
+                while (ccode < code + extra)
+                    ccode += *ccode == ECL_XCLASS ? GET(ccode, 1) : 1;
+                extra += ccode_width(*ccode);
+                break;
+
+            case OP_XCLASS:
+                extra = GET(code, 1);
+                // fallthrough
             case OP_CLASS:
             case OP_NCLASS:
-            case OP_XCLASS:
-                {
-                    if (*code == OP_XCLASS) {
-                        extra = GET(code, 1);
-                        ccode = code + LINK_SIZE + 1;
-                        if ((*ccode & XCL_MAP) != 0)
-                            ccode += 32 / 1;
-                        ccode++;
-                    } else {
-                        ccode = code + 1 + 32 / 1;
-                    }
-
-                    /* For an XCLASS there is always some additional data */
-                    if (*code == OP_XCLASS) {
-                        uint8_t ch;
-                        while ((ch = *ccode++) != XCL_END) {
-                            switch(ch) {
-                                case XCL_NOTPROP:
-                                case XCL_PROP:
-                                    ccode += 2;
-                                    break;
-
-                                default:
-                                    ccode += 1 + print_char(ccode);
-                                    if (ch == XCL_RANGE) {
-                                        ccode += 1 + print_char(ccode);
-                                    }
-                                    break;
-                            }
-                        }
-                    }
-
-                    /* Handle repeats after a class or a back reference */
-
-CLASS_REF_REPEAT:
-                    switch(*ccode)
-                    {
-                        case OP_CRSTAR:
-                        case OP_CRMINSTAR:
-                        case OP_CRPLUS:
-                        case OP_CRMINPLUS:
-                        case OP_CRQUERY:
-                        case OP_CRMINQUERY:
-                        case OP_CRPOSSTAR:
-                        case OP_CRPOSPLUS:
-                        case OP_CRPOSQUERY:
-                        case OP_CRRANGE:
-                        case OP_CRMINRANGE:
-                        case OP_CRPOSRANGE:
-                            extra += priv_OP_lengths[*ccode];
-                            break;
-                        default:
-                            break;
-                    }
-                }
+                ccode = code + OP_lengths[*code] + extra;
+                extra += ccode_width(*ccode);
                 break;
 
             case OP_MARK:
+            case OP_COMMIT_ARG:
             case OP_PRUNE_ARG:
             case OP_SKIP_ARG:
             case OP_THEN_ARG:
@@ -515,42 +649,6 @@ CLASS_REF_REPEAT:
                 break;
         }
 
-        code += priv_OP_lengths[*code] + extra;
+        code += OP_lengths[*code] + extra;
     }
-
-    // Execute the regex
-    rc = pcre_exec(
-        re,                 // compiled pattern
-        NULL,               // extra data (NULL if not studying)
-        subject,            // subject string
-        (int)strlen(subject), // length of subject
-        0,                  // start offset
-        0,                  // options
-        ovector,            // output vector for substring offsets
-        30                  // size of output vector
-    );
-
-    if (rc < 0) {
-        switch(rc) {
-            case PCRE_ERROR_NOMATCH: printf("No match\n"); break;
-            default: printf("Matching error %d\n", rc); break;
-        }
-        pcre_free(re);
-        return 1;
-    }
-
-    printf("Match succeeded, %d captures.\n", rc);
-
-    // Print all captured substrings
-    for (int i = 0; i < rc; i++) {
-        const char *substring;
-        pcre_get_substring(subject, ovector, rc, i, &substring);
-        printf("Group %d: %s\n", i, substring);
-        pcre_free_substring(substring);
-    }
-
-    // Free the compiled regex
-    pcre_free(re);
-
-    return 0;
 }
