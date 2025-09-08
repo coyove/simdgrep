@@ -1,4 +1,5 @@
 #include "STC/include/stc/utf8.h"
+#include "pathutil.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -401,8 +402,8 @@ typedef struct pcre2_real_code {
     const uint8_t *tables;          /* The character tables */
     void    *executable_jit;        /* Pointer to JIT code */
     uint8_t  start_bitmap[32];      /* Bitmap for starting code unit < 256 */
-    size_t blocksize;  /* Total (bytes) that was malloc-ed */
-    size_t code_start; /* Byte code start offset */
+    size_t blocksize;               /* Total (bytes) that was malloc-ed */
+    size_t code_start;              /* Byte code start offset */
     uint32_t magic_number;          /* Paranoid and endianness check */
     uint32_t compile_options;       /* Options passed to pcre2_compile() */
     uint32_t overall_options;       /* Options after processing the pattern */
@@ -424,8 +425,10 @@ typedef struct pcre2_real_code {
     uint32_t optimization_flags;    /* Optimizations enabled at compile time */
 } pcre2_real_code;
 
-int char_width(PCRE2_SPTR data)
+int char_width(PCRE2_SPTR data, bool utf)
 {
+    if (!utf)
+        return 0;
     utf8_decode_t d = {.state=0};
     int n = utf8_decode_codepoint(&d, (const char *)data, NULL);
     return n - 1;
@@ -451,53 +454,29 @@ int ccode_width(int c)
     return 0;
 }
 
-int main(void) {
-    // Pattern: one or more word characters
-    PCRE2_SPTR pattern = (PCRE2_SPTR)"zz(a|b|[cd]+)";
-    PCRE2_SPTR subject = (PCRE2_SPTR)"Hello 123 World";
-
-    int errornumber;
-    PCRE2_SIZE erroroffset;
-    pcre2_code *re;
-
-    // Compile the regular expression
-    re = pcre2_compile(
-            pattern,               // pattern
-            PCRE2_ZERO_TERMINATED, // pattern length
-            PCRE2_UTF,                     // options
-            &errornumber,          // for error code
-            &erroroffset,          // for error offset
-            NULL                   // use default compile context
-            );
-
-    PCRE2_SPTR codestart, code;
-    int depth = 0;
-    code = codestart = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
-
-    for (;;) {
+static PCRE2_SPTR next_token(PCRE2_SPTR code, bool utf, int *op, char *out, int *len, int *skips)
+{
+    for ( ; ; (*skips)++) {
         PCRE2_SPTR ccode;
         uint32_t c;
         unsigned int extra = 0;
 
-        printf("a=%d, depth=%d\n", *code, depth);
+        // printf("a=%d, depth=%d\n", *code, depth);
         switch (*code) {
-            case OP_END:
-                printf("end\n");
-                exit(1);
-
             case OP_CHAR:
             case OP_CHARI:
-                {
-                    int op = *code;
-                    do {
-                        code++;
-                        int n = char_width(code) + 1;
-                        printf("[%.*s]", n, code);
-                        code += n;
-                    } while (*code == op);
-                }
-                continue;
+                *len = 0;
+                *op = *code;
+                do {
+                    code++;
+                    int n = char_width(code, utf) + 1;
+                    memcpy(out + *len, code, n);
+                    *len += n;
+                    code += n;
+                } while (*code == *op);
+                return code;
 
+            case OP_END:
             case OP_BRA:
             case OP_BRAPOS:
             case OP_CBRA:
@@ -511,15 +490,13 @@ int main(void) {
             case OP_BRAZERO:
             case OP_BRAMINZERO:
             case OP_BRAPOSZERO:
-                depth++;
-                break;
-
+            case OP_ALT:
             case OP_KET:
             case OP_KETRMAX:
             case OP_KETRMIN:
             case OP_KETRPOS:
-                depth--;
-                break;
+                *op = *code;
+                return code + OP_lengths[*code] + extra;
 
             case OP_POSSTARI:
             case OP_PLUSI:
@@ -537,7 +514,27 @@ int main(void) {
             case OP_QUERY:
             case OP_MINQUERY:
             case OP_POSQUERY:
-                extra = char_width(code+1);
+            case OP_NOTI:
+            case OP_NOT:
+            case OP_NOTSTARI:
+            case OP_NOTMINSTARI:
+            case OP_NOTPOSSTARI:
+            case OP_NOTPLUSI:
+            case OP_NOTMINPLUSI:
+            case OP_NOTPOSPLUSI:
+            case OP_NOTQUERYI:
+            case OP_NOTMINQUERYI:
+            case OP_NOTPOSQUERYI:
+            case OP_NOTSTAR:
+            case OP_NOTMINSTAR:
+            case OP_NOTPOSSTAR:
+            case OP_NOTPLUS:
+            case OP_NOTMINPLUS:
+            case OP_NOTPOSPLUS:
+            case OP_NOTQUERY:
+            case OP_NOTMINQUERY:
+            case OP_NOTPOSQUERY:
+                extra = char_width(code + 1, utf);
                 break;
 
             case OP_TYPESTAR:
@@ -561,40 +558,6 @@ int main(void) {
             case OP_UPTO:
             case OP_MINUPTO:
             case OP_POSUPTO:
-                extra = char_width(code + 1 + IMM2_SIZE);
-                break;
-
-            case OP_TYPEEXACT:
-            case OP_TYPEUPTO:
-            case OP_TYPEMINUPTO:
-            case OP_TYPEPOSUPTO:
-                if (code[1 + IMM2_SIZE] == OP_PROP || code[1 + IMM2_SIZE] == OP_NOTPROP)
-                    extra = 2;
-                break;
-
-            case OP_NOTI:
-            case OP_NOT:
-            case OP_NOTSTARI:
-            case OP_NOTMINSTARI:
-            case OP_NOTPOSSTARI:
-            case OP_NOTPLUSI:
-            case OP_NOTMINPLUSI:
-            case OP_NOTPOSPLUSI:
-            case OP_NOTQUERYI:
-            case OP_NOTMINQUERYI:
-            case OP_NOTPOSQUERYI:
-            case OP_NOTSTAR:
-            case OP_NOTMINSTAR:
-            case OP_NOTPOSSTAR:
-            case OP_NOTPLUS:
-            case OP_NOTMINPLUS:
-            case OP_NOTPOSPLUS:
-            case OP_NOTQUERY:
-            case OP_NOTMINQUERY:
-            case OP_NOTPOSQUERY:
-                extra = char_width(code + 1);
-                break;
-
             case OP_NOTEXACTI:
             case OP_NOTUPTOI:
             case OP_NOTMINUPTOI:
@@ -603,7 +566,15 @@ int main(void) {
             case OP_NOTUPTO:
             case OP_NOTMINUPTO:
             case OP_NOTPOSUPTO:
-                extra = char_width(code + 1 + IMM2_SIZE);
+                extra = char_width(code + 1 + IMM2_SIZE, utf);
+                break;
+
+            case OP_TYPEEXACT:
+            case OP_TYPEUPTO:
+            case OP_TYPEMINUPTO:
+            case OP_TYPEPOSUPTO:
+                if (code[1 + IMM2_SIZE] == OP_PROP || code[1 + IMM2_SIZE] == OP_NOTPROP)
+                    extra = 2;
                 break;
 
             case OP_REFI:
@@ -651,4 +622,71 @@ int main(void) {
 
         code += OP_lengths[*code] + extra;
     }
+
+    return NULL;
+}
+
+bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed) {
+    char out[strlen((const char *)pattern)];
+    PCRE2_SPTR code = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
+    bool utf = (re->overall_options & PCRE2_UTF) != 0;
+    int len = 0, op = 0, depth = 0, skips = 0;
+
+    while (1) {
+        code = next_token(code, utf, &op, out, &len, &skips);
+        if (op == OP_END) 
+            break;
+        switch (op) {
+            case OP_CHAR:
+            case OP_CHARI:
+                if (depth == 1)
+                    vec_cct_push(fixed, strndup(out, len));
+                break;
+            case OP_ALT:
+                if (depth == 1) {
+                    // e.g.: pattern = "a|b|c"
+                    vec_cct_clear(fixed);
+                    return false;
+                }
+                break;
+            case OP_KET:
+            case OP_KETRMAX:
+            case OP_KETRMIN:
+            case OP_KETRPOS:
+                depth--;
+                break;
+            default:
+                depth++;
+                break;
+        }
+    }
+    return skips == 0;
+}
+
+int main(void) {
+    // Pattern: one or more word characters
+    PCRE2_SPTR pattern = (PCRE2_SPTR)"a\\x20?b";
+    PCRE2_SPTR subject = (PCRE2_SPTR)"Hello 123 World";
+
+    int errornumber;
+    PCRE2_SIZE erroroffset;
+    pcre2_code *re;
+
+    // Compile the regular expression
+    re = pcre2_compile(
+            pattern,               // pattern
+            PCRE2_ZERO_TERMINATED, // pattern length
+            PCRE2_UTF,                     // options
+            &errornumber,          // for error code
+            &erroroffset,          // for error offset
+            NULL                   // use default compile context
+            );
+
+    vec_cct arr = {0};
+    bool fixed = extract_fixed((char *)pattern, re, &arr);
+    for (c_each(i, vec_cct, arr)) {
+        printf("[%s]\n", *(i.ref));
+    }
+    printf("fixed-%d\n", fixed);
+    vec_cct_drop(&arr);
 }
