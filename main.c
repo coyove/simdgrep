@@ -226,10 +226,7 @@ int main(int argc, char **argv)
         ERR0("simdgrep can't start");
         return 0; 
     } 
-    flags.fixed_string = flags.no_ignore = false;
     flags.color = isatty(STDOUT_FILENO);
-    flags.ignore_case = true;
-    flags.quiet = 0;
     flags.xbytes = 1e8;
     flags.verbose = 7;
     flags.num_threads = MIN(255, sysconf(_SC_NPROCESSORS_ONLN) * 2);
@@ -240,14 +237,16 @@ int main(int argc, char **argv)
     default_matcher->top = default_matcher;
 
     g.callback = print_callback;
+    g.ignore_case = true;
+    g.disable_unicode = false;
 
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "nhfFZPGaIA:B:C:E:q:x:j:v:z:")) != -1) {
+    while ((cop = getopt(argc, argv, "nhfFZPGaIAU:B:C:E:q:x:j:v:z:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'f': g.search_name = true; flags.verbose = 4; break;
-        case 'Z': flags.ignore_case = false; break;
+        case 'Z': g.ignore_case = false; break;
         case 'P': flags.color = false; break; 
         case 'q':
                   for (const char *q = optarg; *q; q++)
@@ -255,6 +254,7 @@ int main(int argc, char **argv)
                   break;
         case 'G': flags.no_ignore = true; break;
         case 'n': flags.no_symlink = true; break;
+        case 'U': g.disable_unicode = true; break;
         case 'a': g.binary_mode = BINARY_TEXT; break;
         case 'I': g.binary_mode = BINARY_IGNORE; break;
         case 'B': g.before_lines = MAX(0, atoi(optarg)); break;
@@ -288,27 +288,26 @@ int main(int argc, char **argv)
     LOG("* print line context %d bytes\n", flags.xbytes);
 
     if (flags.fixed_string) {
-        int c = grepper_init(&g, expr, flags.ignore_case);
+        int c = grepper_fixed(&g, expr);
         if (c == INIT_INVALID_UTF8) {
             ERR0("invalid UTF8 string to search")
             goto EXIT;
-        }
-        if (c == INIT_OK) {
-        } else if (flags.ignore_case) {
+        } else if (c == INIT_OK) {
+        } else if (g.ignore_case) {
             WARN("special char case (0x%04x), conduct regex searching\n", c);
             flags.fixed_string = false;
         }
     }
     if (!flags.fixed_string) {
-        grepper_init_rx(&g, expr, flags.ignore_case);
-        if (g.rx.error) {
-            ERR0("invalid expression: %s", g.rx.error);
+        grepper_create(&g, expr);
+        if (g.rx_error) {
+            ERR0("invalid expression: %s", g.rx_error);
             goto EXIT;
         }
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
-            LOG("* fixed %s: %s\n", ng == &g && g.rx.fixed_start ? "prefix" : "pattern", ng->find);
+            LOG("* fixed pattern: %s\n", ng->find);
         }
-        if (g.slow_rx) {
+        if (g.len == 0) {
             WARN("warning: no fixed pattern in '%s', regex searching will be extremely slow\n", expr);
         }
     }
@@ -343,12 +342,16 @@ int main(int argc, char **argv)
         memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
         workers[i].chunk.buf_size = DEFAULT_BUFFER_CAP;
         workers[i].chunk.cap_size = DEFAULT_BUFFER_CAP;
-        workers[i].chunk.buf = (char *)malloc(65600);
+        workers[i].chunk.buf = (char *)malloc(DEFAULT_BUFFER_CAP + 64);
+        if (g.re)
+            workers[i].chunk.match_data = pcre2_match_data_create_from_pattern(g.re, NULL);
         pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
         pthread_join(workers[i].thread, NULL);
         free(workers[i].chunk.buf);
+        if (g.re)
+            pcre2_match_data_free(workers[i].chunk.match_data);
     }
     assert(tasks.count == 0);
 

@@ -8,13 +8,7 @@
 
 #include "stack.h"
 #include "wildmatch.h"
-
-typedef char *cct;
-#define free_cct(p) free(*p)
-#define i_key cct
-#define i_no_clone
-#define i_keydrop free_cct
-#include "STC/include/stc/vec.h"
+#include "pcre_helper.h"
 
 struct matcher {
     struct stacknode node;

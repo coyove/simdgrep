@@ -1,6 +1,6 @@
 #include "printer.h"
 
-struct _flags flags;
+struct _flags flags = {0};
 
 static void print_n(const char *a, const char *b, int len, const char *c)
 {

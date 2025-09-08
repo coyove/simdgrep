@@ -22,8 +22,6 @@
 #include "stack.h"
 #include "pathutil.h"
 
-#include "STC/include/stc/cregex.h"
-
 #if defined(__x86_64__)
 
 #include <emmintrin.h>
@@ -66,21 +64,11 @@ static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 #define INC_FREEABLE -1
 #define INC_WAIT_FREEABLE -2
 
-static int64_t now() {
+inline int64_t now() {
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     return start.tv_sec * 1000000000L + start.tv_nsec;
 }
-
-struct rx_pattern_info {
-    cregex engine;
-    bool fixed_start;
-    bool line_start;
-    bool line_end;
-    int use_regex;
-    int groups;
-    char *error;
-};
 
 struct grepfile;
 
@@ -96,20 +84,22 @@ struct grepline {
 };
 
 struct grepper {
-    char *find;
-    char *findupper;
-    char *findlower;
+    // Options
     bool ignore_case;
-    bool original_ignore_case;
-    bool slow_rx;
     bool search_name;
+    bool disable_unicode;
     int binary_mode;
     int before_lines;
     int after_lines;
-    size_t len;
     bool (*callback)(const struct grepline *);
 
-    struct rx_pattern_info rx;
+    // Internals
+    pcre2_code *re;
+    char *rx_error;
+    char *find;
+    char *findupper;
+    char *findlower;
+    size_t len;
     struct grepper *next_g;
 };
 
@@ -138,6 +128,7 @@ struct grepfile_chunk {
     ssize_t data_size;
     ssize_t cap_size;
     struct grepfile *file;
+    pcre2_match_data *match_data;
 };
 
 struct worker {
@@ -147,13 +138,9 @@ struct worker {
     struct grepfile_chunk chunk;
 };
 
-int torune(uint32_t *rune, const char *s);
+int grepper_fixed(struct grepper *, const char *);
 
-int grepper_init(struct grepper *g, const char *find, bool ignore_case);
-
-void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case);
-
-struct grepper *grepper_add(struct grepper *g, const char *find);
+void grepper_create(struct grepper *, const char *);
 
 void grepper_free(struct grepper *g);
 

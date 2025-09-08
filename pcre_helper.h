@@ -1,11 +1,21 @@
-#include "STC/include/stc/utf8.h"
-#include "pathutil.h"
+#ifndef _PCRE_HELPER_H
+#define _PCRE_HELPER_H
 
 #include <stdio.h>
 #include <string.h>
 
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
+
+typedef char *cct;
+#define free_cct(p) free(*p)
+#define i_key cct
+#define i_no_clone
+#define i_keydrop free_cct
+#include "STC/include/stc/vec.h"
+
+#define i_header
+#include "STC/include/stc/utf8.h"
 
 #define IMM2_SIZE 2
 #define LINK_SIZE 2
@@ -114,8 +124,6 @@ Notation list of operands and operators manipulating a stack of bits. */
   1+IMM2_SIZE, 1,                /* CLOSE, SKIPZERO                        */ \
   1,                             /* DEFINE                                 */ \
   1, 1                           /* \B and \b in UCP mode                  */
-
-const uint8_t OP_lengths[] = { OP_LENGTHS };
 
 enum {
   OP_END,            /* 0 End of pattern */
@@ -425,268 +433,8 @@ typedef struct pcre2_real_code {
     uint32_t optimization_flags;    /* Optimizations enabled at compile time */
 } pcre2_real_code;
 
-int char_width(PCRE2_SPTR data, bool utf)
-{
-    if (!utf)
-        return 0;
-    utf8_decode_t d = {.state=0};
-    int n = utf8_decode_codepoint(&d, (const char *)data, NULL);
-    return n - 1;
-}
 
-int ccode_width(int c)
-{
-    switch(c) {
-        case OP_CRSTAR:
-        case OP_CRMINSTAR:
-        case OP_CRPLUS:
-        case OP_CRMINPLUS:
-        case OP_CRQUERY:
-        case OP_CRMINQUERY:
-        case OP_CRPOSSTAR:
-        case OP_CRPOSPLUS:
-        case OP_CRPOSQUERY:
-        case OP_CRRANGE:
-        case OP_CRMINRANGE:
-        case OP_CRPOSRANGE:
-            return OP_lengths[c];
-    }
-    return 0;
-}
 
-static PCRE2_SPTR next_token(PCRE2_SPTR code, bool utf, int *op, char *out, int *len, int *skips)
-{
-    for ( ; ; (*skips)++) {
-        PCRE2_SPTR ccode;
-        uint32_t c;
-        unsigned int extra = 0;
+bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed);
 
-        // printf("a=%d, depth=%d\n", *code, depth);
-        switch (*code) {
-            case OP_CHAR:
-            case OP_CHARI:
-                *len = 0;
-                *op = *code;
-                do {
-                    code++;
-                    int n = char_width(code, utf) + 1;
-                    memcpy(out + *len, code, n);
-                    *len += n;
-                    code += n;
-                } while (*code == *op);
-                return code;
-
-            case OP_END:
-            case OP_BRA:
-            case OP_BRAPOS:
-            case OP_CBRA:
-            case OP_CBRAPOS:
-            case OP_COND:
-            case OP_SBRA:
-            case OP_SBRAPOS:
-            case OP_SCBRA:
-            case OP_SCBRAPOS:
-            case OP_SCOND:
-            case OP_BRAZERO:
-            case OP_BRAMINZERO:
-            case OP_BRAPOSZERO:
-            case OP_ALT:
-            case OP_KET:
-            case OP_KETRMAX:
-            case OP_KETRMIN:
-            case OP_KETRPOS:
-                *op = *code;
-                return code + OP_lengths[*code] + extra;
-
-            case OP_POSSTARI:
-            case OP_PLUSI:
-            case OP_MINPLUSI:
-            case OP_POSPLUSI:
-            case OP_QUERYI:
-            case OP_MINQUERYI:
-            case OP_POSQUERYI:
-            case OP_STAR:
-            case OP_MINSTAR:
-            case OP_POSSTAR:
-            case OP_PLUS:
-            case OP_MINPLUS:
-            case OP_POSPLUS:
-            case OP_QUERY:
-            case OP_MINQUERY:
-            case OP_POSQUERY:
-            case OP_NOTI:
-            case OP_NOT:
-            case OP_NOTSTARI:
-            case OP_NOTMINSTARI:
-            case OP_NOTPOSSTARI:
-            case OP_NOTPLUSI:
-            case OP_NOTMINPLUSI:
-            case OP_NOTPOSPLUSI:
-            case OP_NOTQUERYI:
-            case OP_NOTMINQUERYI:
-            case OP_NOTPOSQUERYI:
-            case OP_NOTSTAR:
-            case OP_NOTMINSTAR:
-            case OP_NOTPOSSTAR:
-            case OP_NOTPLUS:
-            case OP_NOTMINPLUS:
-            case OP_NOTPOSPLUS:
-            case OP_NOTQUERY:
-            case OP_NOTMINQUERY:
-            case OP_NOTPOSQUERY:
-                extra = char_width(code + 1, utf);
-                break;
-
-            case OP_TYPESTAR:
-            case OP_TYPEMINSTAR:
-            case OP_TYPEPOSSTAR:
-            case OP_TYPEPLUS:
-            case OP_TYPEMINPLUS:
-            case OP_TYPEPOSPLUS:
-            case OP_TYPEQUERY:
-            case OP_TYPEMINQUERY:
-            case OP_TYPEPOSQUERY:
-                if (code[1] == OP_PROP || code[1] == OP_NOTPROP)
-                    extra = 2;
-                break;
-
-            case OP_EXACTI:
-            case OP_UPTOI:
-            case OP_MINUPTOI:
-            case OP_POSUPTOI:
-            case OP_EXACT:
-            case OP_UPTO:
-            case OP_MINUPTO:
-            case OP_POSUPTO:
-            case OP_NOTEXACTI:
-            case OP_NOTUPTOI:
-            case OP_NOTMINUPTOI:
-            case OP_NOTPOSUPTOI:
-            case OP_NOTEXACT:
-            case OP_NOTUPTO:
-            case OP_NOTMINUPTO:
-            case OP_NOTPOSUPTO:
-                extra = char_width(code + 1 + IMM2_SIZE, utf);
-                break;
-
-            case OP_TYPEEXACT:
-            case OP_TYPEUPTO:
-            case OP_TYPEMINUPTO:
-            case OP_TYPEPOSUPTO:
-                if (code[1 + IMM2_SIZE] == OP_PROP || code[1 + IMM2_SIZE] == OP_NOTPROP)
-                    extra = 2;
-                break;
-
-            case OP_REFI:
-            case OP_REF:
-            case OP_DNREFI:
-            case OP_DNREF:
-                ccode = code + OP_lengths[*code];
-                extra += ccode_width(*ccode);
-                break;
-
-            case OP_CALLOUT_STR:
-                extra = GET(code, 1 + 2*LINK_SIZE);
-                break;
-
-            case OP_ECLASS:
-                extra = GET(code, 1);
-                ccode = code + 1 + LINK_SIZE + 1;
-                if ((ccode[-1] & ECL_MAP) != 0)
-                    ccode += 32;
-                while (ccode < code + extra)
-                    ccode += *ccode == ECL_XCLASS ? GET(ccode, 1) : 1;
-                extra += ccode_width(*ccode);
-                break;
-
-            case OP_XCLASS:
-                extra = GET(code, 1);
-                // fallthrough
-            case OP_CLASS:
-            case OP_NCLASS:
-                ccode = code + OP_lengths[*code] + extra;
-                extra += ccode_width(*ccode);
-                break;
-
-            case OP_MARK:
-            case OP_COMMIT_ARG:
-            case OP_PRUNE_ARG:
-            case OP_SKIP_ARG:
-            case OP_THEN_ARG:
-                extra += code[1];
-                break;
-
-            default:
-                break;
-        }
-
-        code += OP_lengths[*code] + extra;
-    }
-
-    return NULL;
-}
-
-bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed) {
-    char out[strlen((const char *)pattern)];
-    PCRE2_SPTR code = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
-    bool utf = (re->overall_options & PCRE2_UTF) != 0;
-    int len = 0, op = 0, depth = 0, skips = 0;
-
-    while (1) {
-        code = next_token(code, utf, &op, out, &len, &skips);
-        if (op == OP_END) 
-            break;
-        switch (op) {
-            case OP_CHAR:
-            case OP_CHARI:
-                if (depth == 1)
-                    vec_cct_push(fixed, strndup(out, len));
-                break;
-            case OP_ALT:
-                if (depth == 1) {
-                    // e.g.: pattern = "a|b|c"
-                    vec_cct_clear(fixed);
-                    return false;
-                }
-                break;
-            case OP_KET:
-            case OP_KETRMAX:
-            case OP_KETRMIN:
-            case OP_KETRPOS:
-                depth--;
-                break;
-            default:
-                depth++;
-                break;
-        }
-    }
-    return skips == 0;
-}
-
-int main(void) {
-    // Pattern: one or more word characters
-    PCRE2_SPTR pattern = (PCRE2_SPTR)"a\\x20?b";
-    PCRE2_SPTR subject = (PCRE2_SPTR)"Hello 123 World";
-
-    int errornumber;
-    PCRE2_SIZE erroroffset;
-    pcre2_code *re;
-
-    // Compile the regular expression
-    re = pcre2_compile(
-            pattern,               // pattern
-            PCRE2_ZERO_TERMINATED, // pattern length
-            PCRE2_UTF,                     // options
-            &errornumber,          // for error code
-            &erroroffset,          // for error offset
-            NULL                   // use default compile context
-            );
-
-    vec_cct arr = {0};
-    bool fixed = extract_fixed((char *)pattern, re, &arr);
-    for (c_each(i, vec_cct, arr)) {
-        printf("[%s]\n", *(i.ref));
-    }
-    printf("fixed-%d\n", fixed);
-    vec_cct_drop(&arr);
-}
+#endif

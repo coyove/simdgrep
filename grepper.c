@@ -1,13 +1,7 @@
 #include "grepper.h"
+#include "printer.h"
 
-#include "STC/include/stc/csview.h"
-
-#define i_import
-#include "STC/include/stc/cregex.h"
 #include "STC/include/stc/utf8.h"
-
-#define RX_SOL 0x80000000
-#define RX_EOL 0x40000000
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -16,237 +10,147 @@
 #include <unistd.h>
 #include <pthread.h>
 
-static int utf8casecmp(const char *a, const char *b, size_t n)
+static int utf8casecmp(const char *a, const char *lo, const char *up, size_t n, bool ascii)
 {
-    csview av = csview_from_n(a, n);
-    csview bv = csview_from_n(b, n);
-    return csview_icmp(&av, &bv);
-}
-
-int torune(uint32_t *rune, const char *s)
-{
-    return chartorune(rune, s);
-}
-
-static bool safecase(uint32_t r)
-{
-    char tmp[4];
-    int lo = utf8_tolower(r), hi = utf8_toupper(r);
-    return utf8_encode(tmp, lo) == utf8_encode(tmp, hi);
-}
-
-static int _rx_skip_bracket(const char *s, int i)
-{
-    int depth = 1;
-    for (++i; depth && *(s + i); ++i) {
-        char c = *(s + i);
-        if (c != '[' && c != ']')
-            continue;
-        if (*(s + i - 1) == '\\')
-            continue;
-        depth += c == '[' ? 1 : -1;
+    if (ascii) {
+        for (int i = 0; i < n; i++) {
+            if (a[i] != lo[i] && a[i] != up[i]) return 1;
+        }
+        return 0;
     }
-    return i;
-}
-
-static int _rx_skip_paren(const char *s, int i)
-{
-    int depth = 1;
-    for (++i; depth && *(s + i); ++i) {
-        char c = *(s + i);
-        if (c != '(' && c != ')' && c != '[')
-            continue;
-        if (*(s + i - 1) == '\\')
-            continue;
-        if (c == '[')
-            i = _rx_skip_bracket(s, i) - 1; // ++i
-        else
-            depth += c == '(' ? 1 : -1;
+#define CMP if (memcmp(a+i, lo+i, c) != 0 && memcmp(a+i, up+i, c) != 0) return 1; break;
+    for (int i = 0; i < n;) {
+        int c = utf8_chr_size(lo + i);
+        switch (c) { // unroll
+            case 4: CMP;
+            case 3: CMP;
+            case 2: CMP;
+            case 1: CMP;
+            default: __builtin_unreachable();
+        }
+        i += c;
     }
-    return i;
+#undef CMP
+    return 0;
 }
 
-void grepper_init_rx(struct grepper *g, const char *s, bool ignore_case)
+int grepper_fixed(struct grepper *g, const char *find)
 {
-    int i = 0, j = 0, sl = strlen(s);
-    char *pp = (char *)malloc(sl + 1);
-    memset(pp, 0, sl + 1);
+    size_t caseless = 0;
 
-    for (bool lit = false; i < sl; i++) {
-        if (lit) {
-            if (s[i] != '\\' || i + 1 >= sl || s[i + 1] != 'E') {
-                pp[j++] = s[i];
+    g->next_g = 0;
+    g->len = strlen(find);
+    assert(g->len);
+    g->find = (char *)malloc(g->len * 3 + 12);
+    g->findupper = g->find + g->len + 4;
+    g->findlower = g->findupper + g->len + 4;
+    memcpy(g->find, find, g->len);
+
+    if (!g->ignore_case) 
+        return INIT_OK;
+
+    if (g->disable_unicode) {
+        for (size_t i = 0; i < g->len; i++) {
+            g->findlower[i] = tolower(g->find[i]);
+            g->findupper[i] = toupper(g->find[i]);
+            if (g->findupper[i] == g->findlower[i])
+                caseless++;
+        }
+        if (caseless == g->len)
+            g->ignore_case = false;
+    } else {
+        utf8_decode_t d = {.state=0};
+        for (size_t off = 0; off < g->len; ) {
+            int n = utf8_decode_codepoint(&d, g->find + off, NULL);
+            uint32_t r = d.codep;
+            if (r == 0xFFFD)
+                return INIT_INVALID_UTF8;
+            uint32_t up = utf8_toupper(r), lo = utf8_tolower(r);
+            int n1 = utf8_encode(g->findupper + off, up);
+            int n2 = utf8_encode(g->findlower + off, lo);
+            off += n;
+
+            if (up == lo && up == r) {
+                caseless += n;
                 continue;
             }
+            if (n1 != n2 || n1 != n) 
+                return r;
         }
-        switch (s[i]) {
-        case '|':
-            g->rx.use_regex++;
-            j = 0;
-            goto INIT;
-        case '\\':
-            if (++i >= sl)
-                goto UNSUPPORTED;
-            switch (s[i]) {
-            case 'Q': lit = true; break;
-            case 'E': lit = false; break;
-            case 'x':
-                if (i + 3 >= sl || s[i + 1] != '{')
-                    goto UNSUPPORTED;
-                char *rend;
-                i += 2;
-                int r = strtol(s + i, &rend, 16);
-                if (*rend != '}' || r < 0 || r > 0x10FFFF)
-                    goto UNSUPPORTED;
-                i = rend - s;
-                if (ignore_case && !safecase(r)) {
-                    g->rx.use_regex++;
-                    pp[j++] = 0;
-                } else {
-                    j += utf8_encode(pp + j, r);
-                }
-                break;
-            case 'r': pp[j++] = '\r'; break;
-            case 't': pp[j++] = '\t'; break;
-            case 'v': pp[j++] = '\v'; break;
-            case 'f': pp[j++] = '\f'; break;
-            case 'a': pp[j++] = '\a'; break;
-            case 's': case 'S': case 'w': case 'W': case 'd': case 'D':
-            case 'b': case 'B': case 'A': case 'z': case 'Z': case 'p': 
-            case 'P':
-                g->rx.use_regex++;
-                pp[j++] = 0;
-                break;
-            default:
-                pp[j++] = s[i];
-            }
-            break;
-        case '.':
-            pp[j++] = 0;
-            g->rx.use_regex++;
-            break;
-        case '^':
-            g->rx.use_regex |= RX_SOL;
-            break;
-        case '$':
-            g->rx.use_regex |= RX_EOL;
-            break;
-        case '+': 
-            g->rx.use_regex++;
-            break;
-        case '(':
-            g->rx.use_regex++;
-            pp[j++] = 0;
-            i = _rx_skip_paren(s, i) - 1; // ++i
-            break;
-        case '{':
-            g->rx.use_regex++;
-            for (++i; s[i] && s[i] != '}'; ++i);
-            // fallthrough
-        case '*': case '?': 
-            g->rx.use_regex++;
-            for (j--; j && ((uint8_t)pp[j] >> 6) == 2; j--);
-            if (j < 0)
-                goto UNSUPPORTED;
-            if (j)
-                pp[j++] = 0;
-            break;
-        case '[':
-            g->rx.use_regex++;
-            pp[j++] = 0;
-            i = _rx_skip_bracket(s, i) - 1; // ++i
-            break;
-        default:
-            if (ignore_case) {
-                uint32_t r;
-                int n = torune(&r, s + i);
-                memcpy(pp + j, s + i, n);
-                i += n - 1;
-                if (!safecase(r)) {
-                    g->rx.use_regex++;
-                    pp[j++] = 0;
-                    break;
-                }
-                j += n;
-            } else {
-                pp[j++] = s[i];
-            }
-            if (!g->rx.use_regex)
-                g->rx.fixed_start = true;
-        }
+        if (caseless == g->len)
+            g->ignore_case = false;
+        // printf("%.*s\n", g->len, g->find);
+        // printf("%.*s\n", g->len, g->findupper);
+        // printf("%.*s\n", g->len, g->findlower);
     }
-
-INIT:
-    if (g->rx.use_regex == RX_SOL) {
-        // ^abc
-        g->rx.use_regex = 0;
-        g->rx.line_start = true;
-    } else if (g->rx.use_regex == RX_EOL) {
-        // abc$
-        g->rx.use_regex = 0;
-        g->rx.line_end = true;
-    } else if (g->rx.use_regex == RX_SOL + RX_EOL) {
-        // ^abc$
-        g->rx.use_regex = 0;
-        g->rx.line_start = g->rx.line_end = true;
-    } else if (g->rx.use_regex) {
-        g->rx.engine = cregex_make(s, ignore_case ? CREG_ICASE : 0);
-        if (g->rx.engine.error != CREG_OK) {
-            g->rx.use_regex = 0;
-            g->rx.error = (char *)malloc(256);
-            snprintf(g->rx.error, 256, "regexp error (%d)", g->rx.engine.error);
-        } else {
-            g->rx.groups = cregex_captures(&g->rx.engine) + 1;
-        }
-    }
-
-    for (int i = 0 ; i < j; ) {
-        int ln = strlen(pp + i);
-        if (ln) {
-            if (!g->find) {
-                grepper_init(g, pp + i, ignore_case);
-            } else {
-                grepper_add(g, pp + i);
-            }
-        }
-        i += ln + 1;
-    }
-    if (!g->find) {
-        grepper_init(g, "<SLOWRX>", false);
-        g->slow_rx = true;
-    }
-
-    free(pp);
-    return;
-
-UNSUPPORTED:
-    free(pp);
-    g->rx.error = (char *)malloc(256);
-    snprintf(g->rx.error, 256, "invalid escape at '%s'", s + i - 1);
+    return INIT_OK;
 }
 
-static bool grepper_match(struct grepper *g, struct grepline *gl, csview *rx_match,
-        const char *line_start, const char *s, const char *line_end)
+void grepper_create(struct grepper *g, const char *s)
 {
-    if (g->rx.use_regex) {
-        const char *rx_start = g->rx.fixed_start ? s : line_start;
+    int errornumber;
+    PCRE2_SIZE erroroffset;
+    char tmp[256];
 
-        char tmp = *line_end;
-        *(char *)line_end = 0;
-        int rc = cregex_match_sv(&g->rx.engine, csview_from_n(rx_start, line_end - rx_start), rx_match, CREG_DEFAULT);
-        *(char *)line_end = tmp;
-        if (rc != CREG_OK)
-            return false;
-
-        gl->match_start = rx_match[0].buf - line_start;
-        gl->match_end = gl->match_start + rx_match[0].size;
-        return true;
+    g->re = 0;
+    g->rx_error = 0;
+    g->find = 0;
+    g->findupper = 0;
+    g->findlower = 0;
+    g->next_g = 0;
+    g->re = pcre2_compile((PCRE2_SPTR)s, PCRE2_ZERO_TERMINATED,
+            (g->ignore_case ? PCRE2_CASELESS : 0) |
+            (g->disable_unicode ? 0 : PCRE2_UTF) |
+            PCRE2_MATCH_INVALID_UTF,
+            &errornumber, &erroroffset, NULL);
+    if (!g->re) {
+        pcre2_get_error_message(errornumber, (PCRE2_UCHAR *)tmp, sizeof(tmp));
+        g->rx_error = (char *)malloc(256 + strlen(s));
+        snprintf(g->rx_error, 256 + strlen(s), "invalid pattern at '%s': %s", s + erroroffset, tmp);
+        return;
     }
-    if (g->rx.line_start && s != line_start)
-        return false;
-    if (g->rx.line_end && s + g->len != line_end)
-        return false;
-    return true;
+    int jitrc = pcre2_jit_compile(g->re, PCRE2_JIT_COMPLETE);
+    if (jitrc != 0) {
+        WARN("JIT not available or failed (code=%d), falling back to interpreter\n", jitrc);
+    }
+
+    vec_cct arr = {0};
+    struct grepper *cg = NULL;
+    bool fixed = extract_fixed(s, g->re, &arr);
+    bool ignore_case = g->ignore_case;
+    for (int i = 0; i < vec_cct_size(&arr); i++) {
+        struct grepper *ng;
+        if (cg == NULL) {
+            ng = g;
+        } else {
+            ng = (struct grepper *)malloc(sizeof(struct grepper));
+            memset(ng, 0, sizeof(struct grepper));
+        }
+        ng->ignore_case = ignore_case;
+        ng->disable_unicode = g->disable_unicode;
+        int rc = grepper_fixed(ng, *vec_cct_at(&arr, i));
+        if (rc == INIT_INVALID_UTF8) {
+            g->rx_error = strdup("invalid UTF8 pattern");
+            goto EXIT;
+        }
+        if (rc != INIT_OK) { // special case characters
+            fixed = false;
+            continue;
+        }
+        if (cg == NULL) {
+            cg = g;
+        } else {
+            cg->next_g = ng;
+            cg = ng;
+        }
+    }
+    if (fixed) {
+        pcre2_code_free(g->re);
+        g->re = 0;
+    }
+
+EXIT:
+    vec_cct_drop(&arr);
 }
 
 #if defined(__x86_64__)
@@ -349,7 +253,7 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, size_t n, const char* lo, const char *up, size_t k)
+const char *strstr_case(const char* s, size_t n, const char* lo, const char *up, size_t k, bool ascii)
 {
     const __m256i firstlo = _mm256_set1_epi8(lo[0]), lastlo = _mm256_set1_epi8(lo[k - 1]);
     const __m256i firstup = _mm256_set1_epi8(up[0]), lastup = _mm256_set1_epi8(up[k - 1]);
@@ -369,7 +273,7 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
             mask &= ~(1LLU << bitpos);
             if (i + bitpos >= n)
                 return 0;
-            if (utf8casecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
+            if (utf8casecmp(s + i + bitpos + 1, lo + 1, up + 1, k - 2, ascii) == 0) {
                 return s + i + bitpos;
             }
         }
@@ -429,7 +333,7 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, size_t n, const char *lo, const char *up, size_t k)
+const char *strstr_case(const char* s, size_t n, const char *lo, const char *up, size_t k, bool ascii)
 {
     uint8x16_t first_lo = vdupq_n_u8(lo[0]), first_up = vdupq_n_u8(up[0]);
     uint8x16_t last_lo = vdupq_n_u8(lo[k - 1]), last_up = vdupq_n_u8(up[k - 1]);
@@ -465,7 +369,7 @@ const char *strstr_case(const char* s, size_t n, const char *lo, const char *up,
             bitpos /= 4;
             if (i + bitpos >= n)
                 return 0;
-            if (utf8casecmp(s + i + bitpos + 1, lo + 1, k - 2) == 0) {
+            if (utf8casecmp(s + i + bitpos + 1, lo + 1, up + 1, k - 2, ascii) == 0) {
                 return s + i + bitpos;
             }
         }
@@ -512,86 +416,32 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
 
 #endif
 
-int grepper_init(struct grepper *g, const char *find, bool ignore_case)
-{
-    g->original_ignore_case = g->ignore_case = ignore_case;
-    g->len = strlen(find);
-
-    if (!ignore_case) {
-        g->find = strdup(find);
-    } else {
-        g->find = (char *)malloc(g->len * 3 + 12);
-        g->findupper = g->find + g->len + 4;
-        g->findlower = g->findupper + g->len + 4;
-        memcpy(g->find, find, g->len);
-        utf8_decode_t d = {.state=0};
-        size_t caseless = 0;
-        for (size_t off = 0; off < g->len; ) {
-            uint32_t r;
-            int n = torune(&r, find + off);
-            if (r == 0xFFFD)
-                return INIT_INVALID_UTF8;
-            uint32_t up = utf8_toupper(r), lo = utf8_tolower(r);
-            int n1 = utf8_encode(g->findupper + off, up);
-            int n2 = utf8_encode(g->findlower + off, lo);
-            off += n;
-
-            if (up == lo && up == r) {
-                caseless += n;
-                continue;
-            }
-            if (n1 != n2 || n1 != n) 
-                return r;
-        }
-        if (caseless == g->len)
-            g->ignore_case = false;
-        // printf("%.*s\n", g->len, g->find);
-        // printf("%.*s\n", g->len, g->findupper);
-        // printf("%.*s\n", g->len, g->findlower);
-    }
-
-    g->next_g = 0;
-    return INIT_OK;
-}
-
-struct grepper *grepper_add(struct grepper *g, const char *find)
-{
-    struct grepper *ng = (struct grepper *)malloc(sizeof(struct grepper));
-    memset(ng, 0, sizeof(struct grepper));
-    grepper_init(ng, find, g->original_ignore_case);
-
-    while (g->next_g)
-        g = g->next_g;
-    g->next_g = ng;
-
-    return ng;
-}
-
 void grepper_free(struct grepper *g)
 {
     if (g->find)
         free(g->find);
+    if (g->re)
+        pcre2_code_free(g->re);
+    if (g->rx_error)
+        free(g->rx_error);
     if (g->next_g)
         grepper_free(g->next_g);
-    if (g->rx.use_regex)
-        cregex_drop(&g->rx.engine);
-    if (g->rx.error)
-        free(g->rx.error);
 }
 
 static const char *indexcasestr(struct grepper *g, const char *s, const char *end)
 {
+    bool ascii = g->disable_unicode && g->ignore_case;
     if (s + g->len > end)
         return 0;
 
     if (s + g->len == end) {
         if (g->ignore_case)
-            return utf8casecmp(s, g->find, g->len) == 0 ? s : 0;
+            return utf8casecmp(s, g->findlower, g->findupper, g->len, ascii) == 0 ? s : 0;
         return memcmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
     return g->ignore_case ?
-        strstr_case(s, end - s, g->findlower, g->findupper, g->len) :
+        strstr_case(s, end - s, g->findlower, g->findupper, g->len, ascii) :
         strstr_x(s, end - s, g->find, g->len);
 }
 
@@ -848,7 +698,6 @@ int grepfile_release(struct grepfile *file)
 
 void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
-    csview rx_match[g->rx.groups];
     struct grepline before_lines[g->before_lines];
     struct grepfile *file = part->file;
     struct grepline gl = {
@@ -859,13 +708,10 @@ void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
     };
     const char *s = part->buf, *last_hit = part->buf, *end = part->buf + part->data_size;
 
-    // Make whole buffer a valid C string, so STC/regex can handle it properly.
-    *(char *)end = 0;
-
     while (s < end) {
-        if (g->slow_rx) {
-            int rc = cregex_match_sv(&g->rx.engine, csview_from_n(s, end - s), rx_match, CREG_DEFAULT);
-            s = rc != CREG_OK ? 0 : rx_match[0].buf;
+        if (g->len == 0) {
+            int rc = pcre2_jit_match(g->re, (PCRE2_SPTR)s, end - s, 0, 0, part->match_data, NULL);
+            s = rc > 0 ? s + pcre2_get_ovector_pointer(part->match_data)[0] : 0;
         } else {
             s = indexcasestr(g, s, end);
         }
@@ -903,9 +749,17 @@ NG:
             goto NG;
         }
 
-        if (!grepper_match(g, &gl, rx_match, line_start, s, line_end)) {
-            s = line_end + 1;
-            continue;
+        if (g->re) {
+            int rc = pcre2_jit_match(g->re,
+                    (PCRE2_SPTR)line_start, line_end - line_start, 0, 0,
+                    part->match_data, NULL);
+            if (rc <= 0) {
+                s = line_end + 1;
+                continue;
+            }
+            PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(part->match_data);
+            gl.match_start = ovector[0];
+            gl.match_end = ovector[1];
         }
 
         if (g->before_lines) {

@@ -16,7 +16,6 @@
 
 struct _flags {
     char cwd[PATH_MAX];
-    bool ignore_case;
     bool color;
     bool fixed_string;
     bool no_ignore;
