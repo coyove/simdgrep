@@ -53,15 +53,31 @@ static func2_t compile_utf8_casecmp(struct grepper *g)
 
     for (int i = 0; i < g->len; ) {
         int c = utf8_chr_size(g->findlower + i);
-        sljit_sw w = (1ull << (c * 8)) - 1;
-
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
-
-        sljit_emit_op2(C, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, w);
-        sljit_emit_op2(C, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, w);
-        sljit_emit_op2(C, SLJIT_AND, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, w);
+        switch (c) {
+        case 1:
+            sljit_emit_op1(C, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U8, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U8, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
+            break;
+        case 2:
+            sljit_emit_op1(C, SLJIT_MOV_U16, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U16, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U16, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
+            break;
+        case 3:
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
+            sljit_emit_op2(C, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 0x00FFFFFFu);
+            sljit_emit_op2(C, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 0x00FFFFFFu);
+            sljit_emit_op2(C, SLJIT_AND, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, 0x00FFFFFFu);
+            break;
+        case 4:
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
+            break;
+        }
 
         struct sljit_jump *next = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_R4, 0);
         struct sljit_jump *next2 = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_R4, 0);
