@@ -1,6 +1,6 @@
 SRC_FILES=$(filter-out test.c, $(wildcard *.c))
 
-OBJS := $(SRC_FILES:.c=.o) 
+OBJS := $(SRC_FILES:.c=.o) sljitLir.o
 
 ifeq ($(shell uname -m), x86_64)
 	CFLAGS+=-mavx2
@@ -21,14 +21,17 @@ endif
 
 all: sg
 
-test_stack: test/test_stack.c stack.c
-	$(CC) -O3 test/test_stack.c stack.c
-
-sg: ${OBJS}
+sg: ${OBJS} 
 	$(CC) $(CFLAGS) -lpthread -o simdgrep $^ $(PCRE_LIB)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+sljitLir.o: sljit/sljit_src/sljitLir.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+test_stack: test/test_stack.c stack.c
+	$(CC) -O3 test/test_stack.c stack.c
 
 clean:
 	rm -f $(OBJS) $(TARGET)

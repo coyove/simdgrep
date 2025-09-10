@@ -221,7 +221,6 @@ void usage()
 
 int main(int argc, char **argv) 
 {
-    // return 0;
     if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
         ERR0("simdgrep can't start");
         return 0; 
@@ -290,7 +289,7 @@ int main(int argc, char **argv)
     if (flags.fixed_string) {
         int c = grepper_fixed(&g, expr);
         if (c == INIT_INVALID_UTF8) {
-            ERR0("invalid UTF8 string to search")
+            ERR0("invalid UTF8 pattern")
             goto EXIT;
         } else if (c == INIT_OK) {
         } else if (g.ignore_case) {
@@ -306,9 +305,6 @@ int main(int argc, char **argv)
         }
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
             LOG("* fixed pattern: %s\n", ng->find);
-        }
-        if (g.len == 0) {
-            WARN("warning: no fixed pattern in '%s', regex searching will be extremely slow\n", expr);
         }
     }
 

@@ -21,6 +21,7 @@
 
 #include "stack.h"
 #include "pathutil.h"
+#include "sljit/sljit_src/sljitLir.h"
 
 #if defined(__x86_64__)
 
@@ -70,6 +71,8 @@ inline int64_t now() {
     return start.tv_sec * 1000000000L + start.tv_nsec;
 }
 
+typedef sljit_sw (SLJIT_FUNC *func2_t)(sljit_sw a, sljit_sw b);
+
 struct grepfile;
 
 struct grepline {
@@ -100,7 +103,9 @@ struct grepper {
     char *findupper;
     char *findlower;
     size_t len;
+    bool fixed;
     struct grepper *next_g;
+    func2_t cmp;
 };
 
 struct grepfile {

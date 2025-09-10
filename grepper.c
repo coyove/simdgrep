@@ -10,34 +10,79 @@
 #include <unistd.h>
 #include <pthread.h>
 
-static int utf8casecmp(const char *a, const char *lo, const char *up, size_t n, bool ascii)
+static sljit_sw ascii_casecmp(sljit_sw a, sljit_sw b)
 {
-    if (ascii) {
-        for (int i = 0; i < n; i++) {
-            if (a[i] != lo[i] && a[i] != up[i]) return 1;
-        }
-        return 0;
+    struct grepper *g = (struct grepper *)a;
+    const char *c = (const char *)b;
+    for (int i = 0; i < g->len; i++) {
+        if (c[i] != g->findlower[i] && c[i] != g->findupper[i]) return 0;
     }
-#define CMP if (memcmp(a+i, lo+i, c) != 0 && memcmp(a+i, up+i, c) != 0) return 1; break;
-    for (int i = 0; i < n;) {
-        int c = utf8_chr_size(lo + i);
-        switch (c) { // unroll
+    return 1;
+}
+
+static sljit_sw utf8_casecmp(sljit_sw b, sljit_sw c)
+{
+    struct grepper *g = (struct grepper *)b;
+    const char *a = (const char *)c;
+#define CMP if (memcmp(a+i, g->findlower+i, c) != 0 && memcmp(a+i, g->findupper+i, c) != 0) return 0; break;
+    for (size_t i = 0; i < g->len;) {
+        int n = utf8_chr_size(g->findlower + i);
+        switch (n) { // unroll
             case 4: CMP;
             case 3: CMP;
             case 2: CMP;
             case 1: CMP;
             default: __builtin_unreachable();
         }
+        i += n;
+    }
+    return 1;
+#undef CMP
+}
+
+static func2_t compile_utf8_casecmp(struct grepper *g)
+{
+    struct sljit_compiler *C = sljit_create_compiler(NULL);
+
+    // S0 = grepper, S1 = text
+    // R0 = lower, R1 = upper
+    // R2 = lower_head, R3 = upper_head, R4 = text_head
+    sljit_emit_enter(C, 0, SLJIT_ARGS2(W, W, W), 5, 2, 0);
+    sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), SLJIT_OFFSETOF(struct grepper, findlower));
+    sljit_emit_op1(C, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), SLJIT_OFFSETOF(struct grepper, findupper));
+
+    for (int i = 0; i < g->len; ) {
+        int c = utf8_chr_size(g->findlower + i);
+        sljit_sw w = (1ull << (c * 8)) - 1;
+
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), (sljit_sw)i);
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R1), (sljit_sw)i);
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S1), (sljit_sw)i);
+
+        sljit_emit_op2(C, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, w);
+        sljit_emit_op2(C, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, w);
+        sljit_emit_op2(C, SLJIT_AND, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, w);
+
+        struct sljit_jump *next = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_R4, 0);
+        struct sljit_jump *next2 = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_R4, 0);
+        sljit_emit_return(C, SLJIT_MOV, SLJIT_IMM, 0);
+        sljit_set_label(next, sljit_emit_label(C));
+        sljit_set_label(next2, sljit_emit_label(C));
+
         i += c;
     }
-#undef CMP
-    return 0;
+    sljit_emit_return(C, SLJIT_MOV, SLJIT_IMM, 1);
+
+    func2_t cmp = sljit_generate_code(C, 0, NULL);
+    sljit_free_compiler(C);
+    return cmp;
 }
 
 int grepper_fixed(struct grepper *g, const char *find)
 {
     size_t caseless = 0;
 
+    g->cmp = 0;
     g->next_g = 0;
     g->len = strlen(find);
     assert(g->len);
@@ -56,8 +101,11 @@ int grepper_fixed(struct grepper *g, const char *find)
             if (g->findupper[i] == g->findlower[i])
                 caseless++;
         }
-        if (caseless == g->len)
+        if (caseless == g->len) {
             g->ignore_case = false;
+        } else {
+            g->cmp = ascii_casecmp;
+        }
     } else {
         utf8_decode_t d = {.state=0};
         for (size_t off = 0; off < g->len; ) {
@@ -77,8 +125,11 @@ int grepper_fixed(struct grepper *g, const char *find)
             if (n1 != n2 || n1 != n) 
                 return r;
         }
-        if (caseless == g->len)
+        if (caseless == g->len) {
             g->ignore_case = false;
+        } else {
+            g->cmp = compile_utf8_casecmp(g);
+        }
         // printf("%.*s\n", g->len, g->find);
         // printf("%.*s\n", g->len, g->findupper);
         // printf("%.*s\n", g->len, g->findlower);
@@ -92,12 +143,14 @@ void grepper_create(struct grepper *g, const char *s)
     PCRE2_SIZE erroroffset;
     char tmp[256];
 
+    g->fixed = 0;
     g->re = 0;
     g->rx_error = 0;
     g->find = 0;
     g->findupper = 0;
     g->findlower = 0;
     g->next_g = 0;
+    g->cmp = 0;
     g->re = pcre2_compile((PCRE2_SPTR)s, PCRE2_ZERO_TERMINATED,
             (g->ignore_case ? PCRE2_CASELESS : 0) |
             (g->disable_unicode ? 0 : PCRE2_UTF) |
@@ -116,7 +169,7 @@ void grepper_create(struct grepper *g, const char *s)
 
     vec_cct arr = {0};
     struct grepper *cg = NULL;
-    bool fixed = extract_fixed(s, g->re, &arr);
+    g->fixed = extract_fixed(s, g->re, &arr);
     bool ignore_case = g->ignore_case;
     for (int i = 0; i < vec_cct_size(&arr); i++) {
         struct grepper *ng;
@@ -131,10 +184,10 @@ void grepper_create(struct grepper *g, const char *s)
         int rc = grepper_fixed(ng, *vec_cct_at(&arr, i));
         if (rc == INIT_INVALID_UTF8) {
             g->rx_error = strdup("invalid UTF8 pattern");
-            goto EXIT;
+            break;
         }
         if (rc != INIT_OK) { // special case characters
-            fixed = false;
+            g->fixed = false;
             continue;
         }
         if (cg == NULL) {
@@ -144,12 +197,6 @@ void grepper_create(struct grepper *g, const char *s)
             cg = ng;
         }
     }
-    if (fixed) {
-        pcre2_code_free(g->re);
-        g->re = 0;
-    }
-
-EXIT:
     vec_cct_drop(&arr);
 }
 
@@ -253,10 +300,11 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, size_t n, const char* lo, const char *up, size_t k, bool ascii)
+const char *strstr_case(const char* s, size_t n, struct grepper *g)
 {
-    const __m256i firstlo = _mm256_set1_epi8(lo[0]), lastlo = _mm256_set1_epi8(lo[k - 1]);
-    const __m256i firstup = _mm256_set1_epi8(up[0]), lastup = _mm256_set1_epi8(up[k - 1]);
+    size_t k = g->len;
+    const __m256i firstlo = _mm256_set1_epi8(g->findlower[0]), lastlo = _mm256_set1_epi8(g->findlower[k - 1]);
+    const __m256i firstup = _mm256_set1_epi8(g->findupper[0]), lastup = _mm256_set1_epi8(g->findupper[k - 1]);
 
     n -= k - 1;
     for (size_t i = 0; i < n; i += 32) {
@@ -273,7 +321,7 @@ const char *strstr_case(const char* s, size_t n, const char* lo, const char *up,
             mask &= ~(1LLU << bitpos);
             if (i + bitpos >= n)
                 return 0;
-            if (utf8casecmp(s + i + bitpos + 1, lo + 1, up + 1, k - 2, ascii) == 0) {
+            if (g->cmp((sljit_sw)g, (sljit_sw)s + i + bitpos)) {
                 return s + i + bitpos;
             }
         }
@@ -333,10 +381,11 @@ const char *strstr_x(const char* s, size_t n, const char* needle, size_t k)
     return 0;
 }
 
-const char *strstr_case(const char* s, size_t n, const char *lo, const char *up, size_t k, bool ascii)
+const char *strstr_case(const char* s, size_t n, struct grepper *g)
 {
-    uint8x16_t first_lo = vdupq_n_u8(lo[0]), first_up = vdupq_n_u8(up[0]);
-    uint8x16_t last_lo = vdupq_n_u8(lo[k - 1]), last_up = vdupq_n_u8(up[k - 1]);
+    size_t k = g->len;
+    uint8x16_t first_lo = vdupq_n_u8(g->findlower[0]), first_up = vdupq_n_u8(g->findupper[0]);
+    uint8x16_t last_lo = vdupq_n_u8(g->findlower[k - 1]), last_up = vdupq_n_u8(g->findupper[k - 1]);
 
     n -= k - 1;
     for (size_t i = 0; i < n; i += 16) {
@@ -369,7 +418,7 @@ const char *strstr_case(const char* s, size_t n, const char *lo, const char *up,
             bitpos /= 4;
             if (i + bitpos >= n)
                 return 0;
-            if (utf8casecmp(s + i + bitpos + 1, lo + 1, up + 1, k - 2, ascii) == 0) {
+            if (g->cmp((sljit_sw)g, (sljit_sw)s + i + bitpos)) {
                 return s + i + bitpos;
             }
         }
@@ -418,6 +467,8 @@ const char *indexlastbyte(const char *start, const char *s, const uint8_t a) {
 
 void grepper_free(struct grepper *g)
 {
+    if (g->cmp && g->cmp != ascii_casecmp)
+        sljit_free_code(g->cmp, NULL);
     if (g->find)
         free(g->find);
     if (g->re)
@@ -430,19 +481,16 @@ void grepper_free(struct grepper *g)
 
 static const char *indexcasestr(struct grepper *g, const char *s, const char *end)
 {
-    bool ascii = g->disable_unicode && g->ignore_case;
     if (s + g->len > end)
         return 0;
 
     if (s + g->len == end) {
         if (g->ignore_case)
-            return utf8casecmp(s, g->findlower, g->findupper, g->len, ascii) == 0 ? s : 0;
+            return g->cmp((sljit_sw)g, (sljit_sw)s) ? s : 0;
         return memcmp(s, g->find, g->len) == 0 ? s : 0;
     }
 
-    return g->ignore_case ?
-        strstr_case(s, end - s, g->findlower, g->findupper, g->len, ascii) :
-        strstr_x(s, end - s, g->find, g->len);
+    return g->ignore_case ? strstr_case(s, end - s, g) : strstr_x(s, end - s, g->find, g->len);
 }
 
 int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
@@ -749,7 +797,7 @@ NG:
             goto NG;
         }
 
-        if (g->re) {
+        if (!g->fixed) {
             int rc = pcre2_jit_match(g->re,
                     (PCRE2_SPTR)line_start, line_end - line_start, 0, 0,
                     part->match_data, NULL);
