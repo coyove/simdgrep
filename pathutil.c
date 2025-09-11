@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#include "pathutil.h"
+#include "grepper.h"
 
 #define _INAME 'N'
 #define _IPATH 'G'
@@ -106,7 +106,7 @@ static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_di
 
 static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_dir)
 {
-    for (c_each(i, vec_cct, m->top->excludes)) {
+    for (c_each(i, vec_cct, m->excludes)) {
         if (_matcher_wildmatch(*(i.ref), name, is_dir))
             return true;
     }
@@ -118,8 +118,10 @@ static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_d
 bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reason, int rn)
 {
     const char *orig = name;
-    if (m->root)
-        name = rel_path(m->root, name);
+    if (m->root) {
+        if (strstr(name, m->root) == name)
+            name = name + strlen(m->root);
+    }
 
     bool incl = is_dir || vec_cct_size(&m->top->includes) == 0;
     for (c_each(i, vec_cct, m->top->includes)) {
@@ -130,16 +132,16 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
     }
     if (!incl) {
         if (reason)
-            snprintf(reason, rn, "%s -> (I)", name);
+            snprintf(reason, rn, "%s not included", name);
         return false;
     }
 
-    for (c_each(i, vec_cct, m->top->excludes)) {
+    for (c_each(i, vec_cct, m->excludes)) {
         const char *v = *(i.ref);
         if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
                 if (reason) {
-                    snprintf(reason, rn, "%s -> %s/%s -> (%c)%s",
+                    snprintf(reason, rn, "%s affected by %s/%s, %crule: %s",
                             name, m->root, m->file, v[0] & 0x7F, v + 1);
                 }
                 return false;
@@ -163,7 +165,7 @@ void matcher_free(void *p)
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl)
 {
     vec_cct *ss = &m->excludes;
-    while (*(end - 1) == ' ' || *(end - 1) == '\r' || *(end - 1) == '\n')
+    while (isspace(*(end - 1)))
         end--;
 
     if (end <= l || l[0] == '#')
@@ -174,9 +176,6 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
         if (++l >= end)
             return false;
     }
-
-    if (l[0] == '/' && ++l >= end)
-        return false;
 
     int simple = is_glob_path(l, end) ? 0 : _ISIMPLE;
     char *buf = (char *)malloc(end - l + 10);

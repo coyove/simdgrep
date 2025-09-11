@@ -14,29 +14,24 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #ifdef __APPLE__
 #include <os/lock.h>
 #endif
 
 #include "stack.h"
-#include "pathutil.h"
+#include "pcre_helper.h"
+#include "wildmatch.h"
 #include "sljit/sljit_src/sljitLir.h"
 
 #if defined(__x86_64__)
-
 #include <emmintrin.h>
 #include <immintrin.h>
 #include <smmintrin.h>  
-
 #elif defined(__aarch64__)
-
 #include <arm_neon.h>
-
 #endif
-
-static int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
-static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 
 #define DEFAULT_BUFFER_CAP 65536
 
@@ -65,13 +60,27 @@ static int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 #define INC_FREEABLE -1
 #define INC_WAIT_FREEABLE -2
 
-inline int64_t now() {
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    return start.tv_sec * 1000000000L + start.tv_nsec;
-}
+#define LOCK() pthread_mutex_lock(&flags.lock)
+#define UNLOCK() pthread_mutex_unlock(&flags.lock)
+
+#define DBG(msg, ...) if (flags.quiet < -1) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
+#define LOG(msg, ...) if (flags.quiet < 0) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
+#define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
+#define ERR0(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg "\n", ##__VA_ARGS__); UNLOCK(); }
+#define ERR(msg, ...) if (flags.quiet <= 1) { LOCK(); fprintf(stderr, msg ": %s\n", ##__VA_ARGS__, strerror(errno)); UNLOCK(); }
 
 typedef sljit_sw (SLJIT_FUNC *func2_t)(sljit_sw a, sljit_sw b);
+
+struct matcher {
+    struct stacknode node;
+    char *root;
+    const char *file;
+    vec_cct includes;
+    vec_cct excludes;
+    vec_cct negate_excludes;
+    struct matcher *parent;
+    struct matcher *top;
+};
 
 struct grepfile;
 
@@ -143,6 +152,43 @@ struct worker {
     struct grepfile_chunk chunk;
 };
 
+struct _flags {
+    char cwd[PATH_MAX];
+    bool color;
+    bool fixed_string;
+    bool no_ignore;
+    bool no_symlink;
+    int num_threads;
+    int quiet;
+    int xbytes;
+    int verbose;
+    pthread_mutex_t lock; 
+    int64_t _Atomic ignores;
+    int64_t _Atomic files;
+};
+
+extern struct _flags flags;
+
+bool print_callback(const struct grepline *l);
+
+const char *is_glob_path(const char *p, const char *end);
+
+const char *rel_path(const char *a, const char *b);
+
+char *join_path(const char *cwd, const char *b, int len);
+
+bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *rule, int n);
+
+void matcher_free(void *m);
+
+bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl);
+
+struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers);
+
+bool is_repo_bin(const char *dir, const char *name);
+
+bool is_dir(const char *name, bool follow_link);
+
 int grepper_fixed(struct grepper *, const char *);
 
 void grepper_create(struct grepper *, const char *);
@@ -169,4 +215,15 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
+inline int64_t now() {
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    return start.tv_sec * 1000000000L + start.tv_nsec;
+}
+
+inline int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
+
+inline int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
+
 #endif
+

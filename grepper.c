@@ -1,5 +1,4 @@
 #include "grepper.h"
-#include "printer.h"
 
 #include "STC/include/stc/utf8.h"
 
@@ -185,8 +184,8 @@ void grepper_create(struct grepper *g, const char *s)
 
     vec_cct arr = {0};
     struct grepper *cg = NULL;
-    g->fixed = extract_fixed(s, g->re, &arr);
     bool ignore_case = g->ignore_case;
+    g->fixed = extract_fixed(s, g->re, &arr);
     for (int i = 0; i < vec_cct_size(&arr); i++) {
         struct grepper *ng;
         if (cg == NULL) {
@@ -813,7 +812,7 @@ NG:
             goto NG;
         }
 
-        if (!g->fixed) {
+        if (g->re && !g->fixed) {
             int rc = pcre2_jit_match(g->re,
                     (PCRE2_SPTR)line_start, line_end - line_start, 0, 0,
                     part->match_data, NULL);

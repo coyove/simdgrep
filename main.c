@@ -1,8 +1,6 @@
 #include "stack.h"
 #include "grepper.h"
 #include "wildmatch.h"
-#include "pathutil.h"
-#include "printer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -304,7 +302,7 @@ int main(int argc, char **argv)
             goto EXIT;
         }
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
-            LOG("* fixed pattern: %s\n", ng->find);
+            LOG("* fixed pattern: %.*s\n", ng->len, ng->find);
         }
     }
 

@@ -1,5 +1,5 @@
 #include "pcre_helper.h"
-#include "printer.h"
+#include "grepper.h"
 
 #define NOTACHAR 0xFFFFFFFF
 
