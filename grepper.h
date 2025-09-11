@@ -20,11 +20,6 @@
 #include <os/lock.h>
 #endif
 
-#include "stack.h"
-#include "pcre_helper.h"
-#include "wildmatch.h"
-#include "sljit/sljit_src/sljitLir.h"
-
 #if defined(__x86_64__)
 #include <emmintrin.h>
 #include <immintrin.h>
@@ -32,6 +27,11 @@
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #endif
+
+#include "stack.h"
+#include "fixture.h"
+#include "wildmatch.h"
+#include "sljit/sljit_src/sljitLir.h"
 
 #define DEFAULT_BUFFER_CAP 65536
 
@@ -62,7 +62,6 @@
 
 #define LOCK() pthread_mutex_lock(&flags.lock)
 #define UNLOCK() pthread_mutex_unlock(&flags.lock)
-
 #define DBG(msg, ...) if (flags.quiet < -1) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
 #define LOG(msg, ...) if (flags.quiet < 0) { LOCK(); printf(msg, ##__VA_ARGS__); UNLOCK(); }
 #define WARN(msg, ...) if (flags.quiet <= 0) { LOCK(); fprintf(stderr, msg, ##__VA_ARGS__); UNLOCK(); }
@@ -75,11 +74,12 @@ struct matcher {
     struct stacknode node;
     char *root;
     const char *file;
-    vec_cct includes;
-    vec_cct excludes;
-    vec_cct negate_excludes;
+    struct strings includes;
+    struct strings excludes;
+    struct strings negate_excludes;
     struct matcher *parent;
     struct matcher *top;
+    bool no_ignore;
 };
 
 struct grepfile;
@@ -156,8 +156,8 @@ struct _flags {
     char cwd[PATH_MAX];
     bool color;
     bool fixed_string;
-    bool no_ignore;
     bool no_symlink;
+    bool no_ignore;
     int num_threads;
     int quiet;
     int xbytes;
@@ -177,6 +177,10 @@ const char *rel_path(const char *a, const char *b);
 
 char *join_path(const char *cwd, const char *b, int len);
 
+bool is_repo_bin(const char *dir, const char *name);
+
+bool is_dir(const char *name, bool follow_link);
+
 bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *rule, int n);
 
 void matcher_free(void *m);
@@ -185,17 +189,11 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
 
 struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers);
 
-bool is_repo_bin(const char *dir, const char *name);
-
-bool is_dir(const char *name, bool follow_link);
-
 int grepper_fixed(struct grepper *, const char *);
 
 void grepper_create(struct grepper *, const char *);
 
 void grepper_free(struct grepper *g);
-
-int64_t grepper_find(struct grepper *g, const char *s, int64_t ls);
 
 int grepfile_open(struct grepper *, struct grepfile *, struct grepfile_chunk *);
 

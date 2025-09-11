@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <string.h>
+#include <assert.h>
 #include <unistd.h>
 
 struct matcher *default_matcher;
@@ -47,8 +48,7 @@ struct grepfile *pop_task(uint8_t tid)
 
 void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
 {
-    struct grepfile *file = (struct grepfile *)malloc(sizeof(struct grepfile));
-    memset(file, 0, sizeof(struct grepfile));
+    struct grepfile *file = (struct grepfile *)calloc(1, sizeof(struct grepfile));
     file->name = name;
     file->root_matcher = m;
     file->status = STATUS_QUEUED;
@@ -229,8 +229,7 @@ int main(int argc, char **argv)
     flags.num_threads = MIN(255, sysconf(_SC_NPROCESSORS_ONLN) * 2);
     getcwd(flags.cwd, sizeof(flags.cwd));
 
-    default_matcher = (struct matcher *)malloc(sizeof(struct matcher));
-    memset(default_matcher, 0, sizeof(struct matcher));
+    default_matcher = (struct matcher *)calloc(1, sizeof(struct matcher));
     default_matcher->top = default_matcher;
 
     g.callback = print_callback;
@@ -302,7 +301,7 @@ int main(int argc, char **argv)
             goto EXIT;
         }
         for (struct grepper *ng = &g; ng; ng = ng->next_g) {
-            LOG("* fixed pattern: %.*s\n", ng->len, ng->find);
+            LOG("* fixed pattern: %.*s\n", (int)ng->len, ng->find);
         }
     }
 
@@ -352,11 +351,8 @@ int main(int argc, char **argv)
     LOG("* searched %lld files\n", flags.files);
 
     int num_ignorefiles = matchers.count;
-    if (flags.no_ignore) {
-        LOG("* all files are searched, no ignores\n");
-    } else {
+    if (!flags.no_ignore)
         LOG("* respected %d .gitignore, %lld files ignored\n", num_ignorefiles, flags.ignores);
-    }
     stack_free(&matchers, matcher_free);
 
 EXIT:

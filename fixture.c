@@ -1,5 +1,6 @@
-#include "pcre_helper.h"
+#include "fixture.h"
 #include "grepper.h"
+#include "stclib/priv/utf8_prv.c"
 
 #define NOTACHAR 0xFFFFFFFF
 
@@ -73,7 +74,6 @@ static PCRE2_SPTR next_token(PCRE2_SPTR code, bool utf, int *op, char *out, int 
     *len = 0;
     while (1) {
         PCRE2_SPTR ccode;
-        uint32_t c;
         unsigned int extra = 0;
 
         DBG("op=%d[%d, %d], outlen=%d\n", *code, code[1], code[2], *len);
@@ -266,7 +266,7 @@ EXIT:
     return NULL;
 }
 
-bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed) {
+bool extract_fixed(const char *pattern, pcre2_code *re, struct strings *fixed) {
     char out[strlen((const char *)pattern)];
     PCRE2_SPTR code = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
     bool utf = (re->overall_options & PCRE2_UTF) != 0;
@@ -280,12 +280,12 @@ bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed) {
             case OP_CHAR:
             case OP_CHARI:
                 if (depth == 1)
-                    vec_cct_push(fixed, strndup(out, len));
+                    strings_push(fixed, strndup(out, len));
                 break;
             case OP_ALT:
                 if (depth == 1) {
                     // e.g.: pattern = "a|b|c"
-                    vec_cct_clear(fixed);
+                    strings_clear(fixed);
                     return false;
                 }
                 break;

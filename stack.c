@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
 
 void stack_push(uint8_t tid, struct stack *l, struct stacknode *n)
 {
@@ -38,4 +39,31 @@ struct stacknode *stack_pop(uint8_t tid, struct stack *l)
         }
     }
 	return NULL;
+}
+
+void strings_push(struct strings *ss, char *s)
+{
+    if (ss->len >= ss->cap) {
+        size_t cap = (ss->cap + 1) * 2;
+        char **grow = (char **)(realloc(ss->data, sizeof(char *) * cap));
+        assert(grow);
+        ss->data = grow;
+        ss->cap = cap;
+    }
+    ss->data[ss->len++] = s;
+}
+
+void strings_clear(struct strings *ss)
+{
+    for (size_t i = 0; i < ss->len; i++)
+        free(ss->data[i]);
+    ss->len = 0;
+}
+
+void strings_free(struct strings *ss)
+{
+    for (size_t i = 0; i < ss->len; i++)
+        free(ss->data[i]);
+    if (ss->data)
+        free(ss->data);
 }

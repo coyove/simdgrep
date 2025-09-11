@@ -1,13 +1,12 @@
 #include "grepper.h"
 
-#include "STC/include/stc/utf8.h"
-
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <assert.h>
 
 static sljit_sw ascii_casecmp(sljit_sw a, sljit_sw b)
 {
@@ -178,25 +177,18 @@ void grepper_create(struct grepper *g, const char *s)
         return;
     }
     int jitrc = pcre2_jit_compile(g->re, PCRE2_JIT_COMPLETE);
-    if (jitrc != 0) {
-        WARN("JIT not available or failed (code=%d), falling back to interpreter\n", jitrc);
-    }
+    if (jitrc != 0)
+        WARN("pcre2: JIT not available (code=%d)\n", jitrc);
 
-    vec_cct arr = {0};
+    struct strings arr = {0};
     struct grepper *cg = NULL;
     bool ignore_case = g->ignore_case;
     g->fixed = extract_fixed(s, g->re, &arr);
-    for (int i = 0; i < vec_cct_size(&arr); i++) {
-        struct grepper *ng;
-        if (cg == NULL) {
-            ng = g;
-        } else {
-            ng = (struct grepper *)malloc(sizeof(struct grepper));
-            memset(ng, 0, sizeof(struct grepper));
-        }
+    for (int i = 0; i < arr.len; i++) {
+        struct grepper *ng = cg == NULL ? g : (struct grepper *)calloc(1, sizeof(struct grepper));
         ng->ignore_case = ignore_case;
         ng->disable_unicode = g->disable_unicode;
-        int rc = grepper_fixed(ng, *vec_cct_at(&arr, i));
+        int rc = grepper_fixed(ng, arr.data[i]);
         if (rc == INIT_INVALID_UTF8) {
             g->rx_error = strdup("invalid UTF8 pattern");
             break;
@@ -212,7 +204,7 @@ void grepper_create(struct grepper *g, const char *s)
             cg = ng;
         }
     }
-    vec_cct_drop(&arr);
+    strings_free(&arr);
 }
 
 #if defined(__x86_64__)
@@ -506,12 +498,6 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
     }
 
     return g->ignore_case ? strstr_case(s, end - s, g) : strstr_x(s, end - s, g->find, g->len);
-}
-
-int64_t grepper_find(struct grepper *g, const char *s, int64_t ls)
-{
-    const char *found = indexcasestr(g, s, s + ls);
-    return found ? found - s : -1;
 }
 
 #ifdef __APPLE__

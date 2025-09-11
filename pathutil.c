@@ -106,8 +106,8 @@ static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_di
 
 static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_dir)
 {
-    for (c_each(i, vec_cct, m->excludes)) {
-        if (_matcher_wildmatch(*(i.ref), name, is_dir))
+    for (size_t i = 0; i < m->negate_excludes.len; i++) {
+        if (_matcher_wildmatch(m->negate_excludes.data[i], name, is_dir))
             return true;
     }
     if (m->parent)
@@ -123,9 +123,9 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
             name = name + strlen(m->root);
     }
 
-    bool incl = is_dir || vec_cct_size(&m->top->includes) == 0;
-    for (c_each(i, vec_cct, m->top->includes)) {
-        if (_matcher_wildmatch(*(i.ref), name, is_dir)) {
+    bool incl = is_dir || m->top->includes.len == 0;
+    for (size_t i = 0; i < m->top->includes.len; i++) {
+        if (_matcher_wildmatch(m->top->includes.data[i], name, is_dir)) {
             incl = true;
             break;
         }
@@ -136,8 +136,8 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         return false;
     }
 
-    for (c_each(i, vec_cct, m->excludes)) {
-        const char *v = *(i.ref);
+    for (size_t i = 0; i < m->excludes.len; i++) {
+        const char *v = m->excludes.data[i];
         if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
                 if (reason) {
@@ -156,15 +156,15 @@ void matcher_free(void *p)
     struct matcher *m = (struct matcher *)p;
     if (m->root)
         free(m->root);
-    vec_cct_drop(&m->includes);
-    vec_cct_drop(&m->excludes);
-    vec_cct_drop(&m->negate_excludes);
+    strings_free(&m->includes);
+    strings_free(&m->excludes);
+    strings_free(&m->negate_excludes);
     free(m);
 }
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl)
 {
-    vec_cct *ss = &m->excludes;
+    struct strings *ss = &m->excludes;
     while (isspace(*(end - 1)))
         end--;
 
@@ -189,7 +189,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     }
     memcpy(buf + 1, l, end - l);
     buf[1 + end - l] = 0;
-    vec_cct_push(incl ? &m->includes : ss, buf);
+    strings_push(incl ? &m->includes : ss, buf);
     return true;
 }
 
@@ -223,7 +223,7 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
     m->root = path;
     m->file = f;
 
-    if (vec_cct_size(&m->excludes) + vec_cct_size(&m->negate_excludes) > 0)
+    if (m->excludes.len + m->negate_excludes.len > 0)
         return m;
 
     matcher_free(m);

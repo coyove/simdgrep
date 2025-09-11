@@ -1,21 +1,17 @@
 #ifndef _PCRE_HELPER_H
 #define _PCRE_HELPER_H
 
-#include <stdio.h>
-#include <string.h>
-
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 
-typedef char *cct;
-#define free_cct(p) free(*p)
-#define i_key cct
-#define i_no_clone
-#define i_keydrop free_cct
-#include "STC/include/stc/vec.h"
+#include "stack.h"
+#include "stclib/common.h"
+#include "stclib/priv/utf8_prv.h"
 
-#define i_header
-#include "STC/include/stc/utf8.h"
+/*
+ * Following definitions are copied and merged from pcre2 internal headers.
+ * It shall always align the version with the lib linked with.
+ * */
 
 #define IMM2_SIZE 2
 #define LINK_SIZE 2
@@ -433,8 +429,6 @@ typedef struct pcre2_real_code {
     uint32_t optimization_flags;    /* Optimizations enabled at compile time */
 } pcre2_real_code;
 
-
-
-bool extract_fixed(const char *pattern, pcre2_code *re, vec_cct *fixed);
+bool extract_fixed(const char *pattern, pcre2_code *re, struct strings *fixed);
 
 #endif

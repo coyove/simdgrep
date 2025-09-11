@@ -2,6 +2,7 @@ SRC_FILES=$(filter-out test.c, $(wildcard *.c))
 
 OBJS := $(SRC_FILES:.c=.o) sljitLir.o
 
+CFLAGS+=-Wall
 ifeq ($(shell uname -m), x86_64)
 	CFLAGS+=-mavx2
 endif

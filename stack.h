@@ -25,6 +25,18 @@ void stack_push(uint8_t tid, struct stack *l, struct stacknode *n);
 
 struct stacknode *stack_pop(uint8_t tid, struct stack *);
 
+struct strings {
+    char **data;
+    size_t len;
+    size_t cap;
+};
+
+void strings_push(struct strings *ss, char *s);
+
+void strings_clear(struct strings *ss);
+
+void strings_free(struct strings *ss);
+
 #define STACK_FREE_VARARG(_1,_2,NAME,...) NAME
 
 #define STACK_FREE(s) do { FOREACH_STACK(s, n) free(n); } while(0); 
