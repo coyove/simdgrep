@@ -14,6 +14,8 @@ struct matcher *default_matcher;
 struct stack tasks = {0};
 struct stack matchers = {0};
 struct grepper g = {0};
+pthread_mutex_t wait_task_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t wait_task_cond = PTHREAD_COND_INITIALIZER;
 
 #ifdef SLOW_TASK
 pthread_mutex_t task_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -30,6 +32,7 @@ void push_task(uint8_t tid, struct grepfile *t)
     taskq[taskqi++] = t;
     pthread_mutex_unlock(&task_lock);
 #endif
+    pthread_cond_broadcast(&wait_task_cond);
 }
 
 struct grepfile *pop_task(uint8_t tid)
@@ -77,7 +80,10 @@ NEXT:
     if (!file) {
         if (atomic_load(p->actives)) {
             struct timespec req = { .tv_sec = 0, .tv_nsec = 10000000 /* 10ms */ };
-            nanosleep(&req, NULL);
+            // nanosleep(&req, NULL);
+            pthread_mutex_lock(&wait_task_lock);
+            pthread_cond_timedwait(&wait_task_cond, &wait_task_lock, &req);
+            pthread_mutex_unlock(&wait_task_lock);
             goto NEXT;
         }
         return 0;
