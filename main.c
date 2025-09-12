@@ -1,6 +1,5 @@
 #include "stack.h"
 #include "grepper.h"
-#include "wildmatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +31,7 @@ void push_task(uint8_t tid, struct grepfile *t)
     taskq[taskqi++] = t;
     pthread_mutex_unlock(&task_lock);
 #endif
-    pthread_cond_broadcast(&wait_task_cond);
+    pthread_cond_signal(&wait_task_cond);
 }
 
 struct grepfile *pop_task(uint8_t tid)

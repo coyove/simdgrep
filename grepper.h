@@ -29,8 +29,7 @@
 #endif
 
 #include "stack.h"
-#include "fixture.h"
-#include "wildmatch.h"
+#include "vendor.h"
 #include "sljit/sljit_src/sljitLir.h"
 
 #define DEFAULT_BUFFER_CAP 65536
