@@ -2,8 +2,7 @@
 #define _PCRE_HELPER_H
 
 #define PCRE2_CODE_UNIT_WIDTH 8
-#include <pcre2.h>
-
+#include "pcre2/src/pcre2.h"
 #include "stack.h"
 #include "stclib/common.h"
 #include "stclib/priv/utf8_prv.h"

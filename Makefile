@@ -13,12 +13,7 @@ else
 	CFLAGS+=-O3
 endif
 
-ifeq ($(shell uname -s),Darwin)
-    PCRE_LIB=/opt/homebrew/lib/libpcre2-8.a
-endif
-ifeq ($(shell uname -s),Linux)
-    PCRE_LIB=/usr/local/lib/libpcre2-8.a
-endif
+PCRE_LIB=pcre2/.libs/libpcre2-8.a
 
 all: sg
 
@@ -28,7 +23,7 @@ sg: ${OBJS}
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-sljitLir.o: sljit/sljit_src/sljitLir.c
+sljitLir.o: pcre2/deps/sljit/sljit_src/sljitLir.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 test_stack: test/test_stack.c stack.c

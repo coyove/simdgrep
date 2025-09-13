@@ -30,7 +30,7 @@
 
 #include "stack.h"
 #include "vendor.h"
-#include "sljit/sljit_src/sljitLir.h"
+#include "pcre2/deps/sljit/sljit_src/sljitLir.h"
 
 #define DEFAULT_BUFFER_CAP 65536
 

@@ -1,3 +1,4 @@
-[submodule "sljit"]
-	path = sljit
-	url = https://github.com/zherczeg/sljit
+[submodule "pcre2"]
+	path = pcre2
+	url = https://github.com/PCRE2Project/pcre2
+    branch = pcre2-10.46
