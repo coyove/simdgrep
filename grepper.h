@@ -9,7 +9,6 @@
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
-#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -212,15 +211,15 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
-inline int64_t now() {
+static inline int64_t now() {
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     return start.tv_sec * 1000000000L + start.tv_nsec;
 }
 
-inline int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
+static inline int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
 
-inline int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
+static inline int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }
 
 #endif
 

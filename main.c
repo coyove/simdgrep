@@ -353,11 +353,11 @@ int main(int argc, char **argv)
     }
     assert(tasks.count == 0);
 
-    LOG("* searched %lld files\n", flags.files);
+    LOG("* searched %ld files\n", flags.files);
 
     int num_ignorefiles = matchers.count;
     if (!flags.no_ignore)
-        LOG("* respected %d .gitignore, %lld files ignored\n", num_ignorefiles, flags.ignores);
+        LOG("* respected %d .gitignore, %ld files ignored\n", num_ignorefiles, flags.ignores);
     stack_free(&matchers, matcher_free);
 
 EXIT:

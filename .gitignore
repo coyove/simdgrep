@@ -9,3 +9,7 @@ test*.txt
 *.dSYM
 *.o
 perf*
+*.cmake
+CMake*
+!CMakeLists.txt
+/build/

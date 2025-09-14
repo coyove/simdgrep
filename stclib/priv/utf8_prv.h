@@ -29,7 +29,7 @@
 // The following functions assume valid utf8 strings:
 
 /* number of bytes in the utf8 codepoint from s */
-inline int utf8_chr_size(const char *s) {
+static inline int utf8_chr_size(const char *s) {
     unsigned b = (uint8_t)*s;
     if (b < 0x80) return 1;
     /*if (b < 0xC2) return 0;*/
@@ -55,7 +55,7 @@ extern int      utf8_decode_codepoint(utf8_decode_t* d, const char* s, const cha
 extern uint32_t utf8_tolower(uint32_t c);
 extern uint32_t utf8_toupper(uint32_t c);
 
-inline uint32_t utf8_decode(utf8_decode_t* d, const uint32_t byte) {
+static inline uint32_t utf8_decode(utf8_decode_t* d, const uint32_t byte) {
     const uint32_t type = utf8_dtab[byte];
     d->codep = d->state ? (byte & 0x3fu) | (d->codep << 6)
                         : (0xffU >> type) & byte;
