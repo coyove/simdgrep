@@ -8,7 +8,7 @@ find_package(Threads REQUIRED)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-Wall -Od -g)
 else()
-    add_compile_options(-Wall -O2)
+    add_compile_options(-Wall -O3)
 endif()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")

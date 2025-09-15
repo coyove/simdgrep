@@ -2,7 +2,9 @@
 #define _PCRE_HELPER_H
 
 #define PCRE2_CODE_UNIT_WIDTH 8
-#include "pcre2/src/pcre2.h"
+#include <pcre2.h>
+#include <unistd.h>
+
 #include "stack.h"
 #include "stclib/common.h"
 #include "stclib/priv/utf8_prv.h"
@@ -504,5 +506,10 @@ static inline int sane_iscase(int x, int is_lower)
 #define WM_MATCH 0
 
 int wildmatch(const char *pattern, const char *text, unsigned int flags);
+
+static inline ssize_t v_pread(int fd, void *buf, size_t nbyte, size_t offset)
+{
+    return pread(fd, buf, nbyte, offset);
+}
 
 #endif

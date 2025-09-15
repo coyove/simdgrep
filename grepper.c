@@ -500,14 +500,6 @@ static const char *indexcasestr(struct grepper *g, const char *s, const char *en
     return g->ignore_case ? strstr_case(s, end - s, g) : strstr_x(s, end - s, g->find, g->len);
 }
 
-#ifdef __APPLE__
-#define FILE_LOCK() os_unfair_lock_lock(&file->lock)
-#define FILE_UNLOCK() os_unfair_lock_unlock(&file->lock)
-#else
-#define FILE_LOCK() pthread_mutex_lock(&file->lock)
-#define FILE_UNLOCK() pthread_mutex_unlock(&file->lock)
-#endif
-
 int grepfile_inc_ref(struct grepfile *file)
 {
     int r;
@@ -555,16 +547,17 @@ static void grepfile_chunk_grow(struct grepfile_chunk *part, size_t n)
     }
 }
 
-static int _grepfile_iter_prev_chunk(struct grepfile *file, struct grepfile_chunk *part)
+static int _grepfile_iter_prev_chunk(struct grepfile_chunk *part)
 {
     if (part->off == 0)
         return FILL_EOF;
 
+    struct grepfile *file = part->file;
     size_t buf_size = part->data_size = MIN(DEFAULT_BUFFER_CAP, part->off);
 
     // Fullfill buffer to part->data_size.
     for (char *buf = part->buf; buf < part->buf + part->data_size; ) {
-        int n = pread(file->fd, buf, buf_size, part->off);
+        int n = v_pread(file->fd, buf, buf_size, part->off);
         if (n < 0)
             return errno;
         buf += n;
@@ -589,8 +582,9 @@ static int _grepfile_iter_prev_chunk(struct grepfile *file, struct grepfile_chun
     return res;
 }
 
-static int _grepfile_iter_next_chunk(struct grepfile *file, struct grepfile_chunk *part)
+static int _grepfile_iter_next_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
+    struct grepfile *file = part->file;
     part->off += part->data_size;
     part->data_size = 0;
 
@@ -603,12 +597,12 @@ static int _grepfile_iter_next_chunk(struct grepfile *file, struct grepfile_chun
     int n, res;
 
 READ:
-    n = pread(file->fd, buf, buf_size, part->off);
+    n = v_pread(file->fd, buf, buf_size, part->off);
     if (n < 0)
         return errno;
     
     // Calc total lines.
-    if ((file->status & STATUS_IS_BINARY_MATCHING) == 0)
+    if (g->binary_mode == BINARY_TEXT || (file->status & STATUS_IS_BINARY) == 0)
         part->prev_lines += countbyte(buf, buf + n, '\n');
 
     if (part->off + n < file->size) {
@@ -633,8 +627,9 @@ READ:
     return res;
 }
 
-int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
+int grepfile_acquire_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
+    struct grepfile *file = part->file;
     FILE_LOCK();
 
     if (file->off >= file->size) {
@@ -655,7 +650,7 @@ int grepfile_acquire_chunk(struct grepfile *file, struct grepfile_chunk *part)
     int n, res;
 
 READ:
-    n = pread(file->fd, buf, buf_size, file->off);
+    n = v_pread(file->fd, buf, buf_size, file->off);
     if (n < 0) {
         // Only one caller will see the error (then process), others will get EOF.
         file->off = file->size;
@@ -664,7 +659,7 @@ READ:
     }
     
     // Calc total lines.
-    if ((file->status & STATUS_IS_BINARY_MATCHING) == 0)
+    if (g->binary_mode == BINARY_TEXT || (file->status & STATUS_IS_BINARY) == 0)
         file->lines += countbyte(buf, buf + n, '\n');
 
     if (file->off + n < file->size) {
@@ -712,7 +707,7 @@ int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chun
     if (file->size == 0)
         return OPEN_EMPTY;
 
-    int res = grepfile_acquire_chunk(file, part);
+    int res = grepfile_acquire_chunk(g, part);
     if (res == FILL_LAST_CHUNK || res == FILL_OK) {
         // Fill okay.
     } else if (res == FILL_EOF) {
@@ -723,12 +718,8 @@ int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chun
 
     if (indexbyte(part->buf, part->buf + MIN(1024, part->data_size), 0)) {
         file->status |= STATUS_IS_BINARY;
-        switch (g->binary_mode) {
-            case BINARY_IGNORE:
-                return OPEN_BINARY_SKIPPED;
-            case BINARY:
-                file->status |= STATUS_IS_BINARY_MATCHING;
-        }
+        if (g->binary_mode == BINARY_IGNORE) 
+            return OPEN_BINARY_SKIPPED;
     }
     return res;
 }
@@ -737,9 +728,6 @@ int grepfile_release(struct grepfile *file)
 {
     if (file->fd)
         close(file->fd);
-#ifndef __APPLE__
-    pthread_mutex_destroy(&file->lock); 
-#endif
     free(file->name);
     free(file);
     return 1;
@@ -751,7 +739,7 @@ void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
     struct grepfile *file = part->file;
     struct grepline gl = {
         .g = g,
-        .file = part,
+        .chunk = part,
         .nr = part->prev_lines,
         .is_ctxline = false,
     };
@@ -819,7 +807,7 @@ NG:
 PREV_PREV:
                 ss = indexlastbyte(pp.buf, ss, '\n');
                 if (!ss) {
-                    int res = _grepfile_iter_prev_chunk(file, &pp);
+                    int res = _grepfile_iter_prev_chunk(&pp);
                     if (res == FILL_EOF || res >= 0)
                         break;
                     bound = pp.buf;
@@ -852,7 +840,7 @@ PREV_PREV:
             const char *ss = line_end + 1;
             if (ss >= end) {
                 exit_flag = true;
-                int res = _grepfile_iter_next_chunk(file, part);
+                int res = _grepfile_iter_next_chunk(g, part);
                 if (res == FILL_EOF || res >= 0)
                     goto EXIT;
                 ss = part->buf;

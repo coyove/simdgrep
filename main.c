@@ -54,16 +54,10 @@ void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
     file->name = name;
     file->root_matcher = m;
     file->status = STATUS_QUEUED;
+    pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
+    file->lock = mx;
     if (is_dir)
         file->status |= STATUS_IS_DIR;
-#ifdef __APPLE__
-    file->lock = OS_UNFAIR_LOCK_INIT;
-#else
-    if (pthread_mutex_init(&file->lock, NULL) != 0) {
-        ERR0("out of resource\n");
-        exit(1);
-    }
-#endif
     push_task(tid, file);
     if (!is_dir)
         atomic_fetch_add(&flags.files, 1);
@@ -146,7 +140,7 @@ NEXT:
             goto FREE_FILE;
         } // INC_NEXT
         push_task(p->tid, file);
-        res = grepfile_acquire_chunk(file, &p->chunk);
+        res = grepfile_acquire_chunk(&g, &p->chunk);
         if (res == FILL_OK || res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
         } else if (res == FILL_EOF) {
@@ -169,9 +163,9 @@ NEXT:
         } else if (res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
         } else if (res == FILL_OK) {
-            while (file->status & STATUS_IS_BINARY_MATCHING || tasks.count > flags.num_threads) {
+            while ((file->status & STATUS_IS_BINARY) || tasks.count > flags.num_threads) {
                 grepfile_process_chunk(&g, &p->chunk);
-                int res = grepfile_acquire_chunk(file, &p->chunk);
+                int res = grepfile_acquire_chunk(&g, &p->chunk);
                 if (res != FILL_OK && res != FILL_LAST_CHUNK) {
                     if (res != FILL_EOF)
                         ERR("read %s", file->name);
@@ -352,12 +346,13 @@ int main(int argc, char **argv)
             pcre2_match_data_free(workers[i].chunk.match_data);
     }
     assert(tasks.count == 0);
+    print_flush();
 
-    LOG("* searched %ld files\n", flags.files);
+    LOG("* searched %ld files\n", (long)flags.files);
 
     int num_ignorefiles = matchers.count;
     if (!flags.no_ignore)
-        LOG("* respected %d .gitignore, %ld files ignored\n", num_ignorefiles, flags.ignores);
+        LOG("* respected %d .gitignore, %ld files ignored\n", num_ignorefiles, (long)flags.ignores);
     stack_free(&matchers, matcher_free);
 
 EXIT:

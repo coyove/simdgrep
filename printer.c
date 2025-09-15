@@ -2,13 +2,29 @@
 
 struct _flags flags = {0};
 
+static char printer_buffer[1 << 20];
+
+static size_t printer_buffer_size = 0;
+
+static void v_print(const char *data, ssize_t len)
+{
+    if (printer_buffer_size + len > sizeof(printer_buffer)) {
+        fwrite(printer_buffer, 1, printer_buffer_size, stdout);
+        fwrite(data, 1, len, stdout);
+        printer_buffer_size = 0;
+        return;
+    }
+    memcpy(printer_buffer + printer_buffer_size, data, len);
+    printer_buffer_size += len;
+}
+
 static void print_n(const char *a, const char *b, int len, const char *c)
 {
     if (a && *a)
-        fwrite(a, 1, strlen(a), stdout);
-    fwrite(b, 1, len, stdout);
+        v_print(a, strlen(a));
+    v_print(b, len);
     if (c && *c)
-        fwrite(c, 1, strlen(c), stdout);
+        v_print(c, strlen(c));
 }
 
 static void print_s(const char *a, const char *b, const char *c)
@@ -27,15 +43,23 @@ static void print_i(const char *a, uint64_t b, const char *c)
     print_n(a, s, buf + 32 - s, c);
 }
 
+void print_flush()
+{
+    PRINT_LOCK();
+    fwrite(printer_buffer, 1, printer_buffer_size, stdout);
+    printer_buffer_size = 0;
+    PRINT_UNLOCK();
+}
+
 bool print_callback(const struct grepline *l)
 {
-    const char *name = rel_path(flags.cwd, l->file->file->name);
-    LOCK();
-    if (l->file->file->status & STATUS_IS_BINARY_MATCHING) {
+    const char *name = rel_path(flags.cwd, l->chunk->file->name);
+    PRINT_LOCK();
+    if ((l->chunk->file->status & STATUS_IS_BINARY) && l->g->binary_mode == BINARY) {
         if (flags.verbose && !l->is_ctxline) {
             printf(flags.verbose == 4 ? "%s\n" : "%s: binary file matches\n", name);
         }
-        UNLOCK();
+        PRINT_UNLOCK();
         return false;
     } else {
         int i = 0, j = l->len;
@@ -77,6 +101,6 @@ bool print_callback(const struct grepline *l)
         if (flags.verbose)
             print_s(0, "\n", 0);
     }
-    UNLOCK();
+    PRINT_UNLOCK();
     return flags.verbose != 4; // 4: filename only
 }
