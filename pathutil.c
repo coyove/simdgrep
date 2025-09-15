@@ -234,24 +234,24 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
 {
     struct matcher *m = NULL;
     bool enter_repo = false;
-    if (faccessat(dirfd, ".git", F_OK, AT_SYMLINK_NOFOLLOW) != 0)
-        goto GITIGNORE;
-
-    enter_repo = true;
-    m = _matcher_load_raw(dir, ".git/info/exclude");
-    if (m) {
-        m->parent = parent->top;
-        m->top = parent->top;
-        stack_push(0, matchers, (struct stacknode *)m);
-        parent = m;
+    if (faccessat(dirfd, ".git", F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
+        enter_repo = true;
+        m = _matcher_load_raw(dir, ".git/info/exclude");
+        if (m) {
+            m->parent = parent->top;
+            m->top = parent->top;
+            stack_push(0, matchers, (struct stacknode *)m);
+            parent = m;
+        }
     }
 
-GITIGNORE:
-    m = _matcher_load_raw(dir, ".gitignore");
-    if (m) {
-        m->parent = enter_repo ? parent->top : parent;
-        m->top = parent->top;
-        stack_push(0, matchers, (struct stacknode *)m);
+    if (faccessat(dirfd, ".gitignore", F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
+        m = _matcher_load_raw(dir, ".gitignore");
+        if (m) {
+            m->parent = enter_repo ? parent->top : parent;
+            m->top = parent->top;
+            stack_push(0, matchers, (struct stacknode *)m);
+        }
     }
     return m;
 }

@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD 11)
 find_package(Threads REQUIRED)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_options(-Wall -O0 -g)
+    add_compile_options(-Wall -Od -g)
 else()
     add_compile_options(-Wall -O2)
 endif()
