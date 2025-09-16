@@ -11,6 +11,8 @@
 #define PATH_MAX MAX_PATH
 #else
 #include <unistd.h>
+#include <alloca.h>
+#include <sys/resource.h>
 #endif
 
 #include "stack.h"
@@ -518,6 +520,14 @@ int wildmatch(const char *pattern, const char *text, unsigned int flags);
 static inline ssize_t v_pread(int fd, void *buf, size_t nbyte, size_t offset)
 {
     return pread(fd, buf, nbyte, offset);
+}
+
+static inline uint64_t max_openfiles()
+{
+    struct rlimit rlim;
+    if (getrlimit(RLIMIT_NOFILE, &rlim) != 0)
+        exit(1);
+    return rlim.rlim_cur;
 }
 
 #endif

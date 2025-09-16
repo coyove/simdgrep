@@ -6,10 +6,20 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#define _INAME 'N'
-#define _IPATH 'G'
-#define _IDIR 'D'
-#define _ISIMPLE 0x80
+#define MATCH_FILE   1
+#define MATCH_SUFFIX_FILE   9
+#define MATCH_FULL_FILE   2
+#define MATCH_DIR    3
+#define MATCH_SUFFIX_DIR 4
+#define MATCH_FULL_DIR   5
+
+static bool ends_with_rule(const char *a, const char *b)
+{
+    size_t al = strlen(a);
+    size_t bl = (*(uint32_t *)b) & 0xFFFFFF;
+    b += 4;
+    return al >= bl && strcmp(a + al - bl, b) == 0;
+}
 
 const char *is_glob_path(const char *p, const char *end)
 {
@@ -78,28 +88,21 @@ char *join_path(const char *root, const char *b, int len)
 
 static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_dir)
 {
-    int simple = pattern[0] & _ISIMPLE, flag = pattern[0] & 0x7F;
-    if (flag == _IDIR) {
-        if (!is_dir)
-            return false;
-        flag = _INAME;
-    }
-    if (flag == _INAME) {
-        const char *s = strrchr(name, '/');
-        name = s ? s + 1 : name;
-        if (simple)
-            return strcmp(name, pattern + 1) == 0;
-    }
-    pattern++;
-    if (simple) {
-        const char *f = strstr(name, pattern);
-        if (f == NULL)
-            return false;
-        if (f > name && *(f - 1) != '/')
-            return false;
-        f += strlen(pattern);
-        return *f == 0 || *f == '/';
-    }
+    unsigned flag = (*(uint32_t *)pattern) >> 24;
+    if (flag == MATCH_SUFFIX_DIR)
+        return is_dir && ends_with_rule(name, pattern);
+    if (flag == MATCH_SUFFIX_FILE)
+        return ends_with_rule(name, pattern);
+
+    pattern += 4;
+    if (flag == MATCH_FULL_FILE)
+        return strcmp(name, pattern) == 0;
+    if (flag == MATCH_FULL_DIR)
+        return is_dir && strcmp(name, pattern) == 0;
+    if (flag == MATCH_DIR)
+        return is_dir && wildmatch(pattern, name, 0) == WM_MATCH;
+
+    // if (flag == MATCH_FILE)
     return wildmatch(pattern, name, 0) == WM_MATCH;
 }
 
@@ -131,7 +134,7 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
     }
     if (!incl) {
         if (reason)
-            snprintf(reason, rn, "%s not included", name);
+            DBG("[IGNORE] %s not included", name);
         return false;
     }
 
@@ -140,8 +143,8 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
                 if (reason) {
-                    snprintf(reason, rn, "%s affected by %s/%s, %crule: %s",
-                            name, m->root, m->file, v[0] & 0x7F, v + 1);
+                    char *tmp;
+                    DBG("[IGNORE] %s by %s/%s, rule: %s", name, m->root, m->file, v);
                 }
                 return false;
             }
@@ -176,18 +179,29 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
             return false;
     }
 
-    int simple = is_glob_path(l, end) ? 0 : _ISIMPLE;
+    if (*l == '/' && l + 1 == end)
+        return false;
+
+    bool simple = !is_glob_path(l, end);
     char *buf = (char *)malloc(end - l + 10);
-    const char *slash = strrchr(l, '/');
-    if (*(end - 1) == '/' && slash == end - 1) {
-        buf[0] = simple | _IDIR; // 'abc/': match directory only
-    } else if (!slash) {
-        buf[0] = simple | _INAME; // 'abc/def': match name
+    int off = 0;
+    uint32_t *op = (uint32_t *)buf;
+    if (*(end - 1) == '/') {
+        if (simple)
+            *op = *l == '/' ? MATCH_FULL_DIR : (off = 1, MATCH_SUFFIX_DIR);
+        else 
+            *op = MATCH_DIR;
+        end--;
+    } else if (*l == '/') {
+        *op = simple ? MATCH_FULL_FILE : MATCH_FILE;
     } else {
-        buf[0] = simple | _IPATH; // 'abc/**/def': match any path
+        *op = simple ? (off = 1, MATCH_SUFFIX_FILE) : MATCH_FILE;
     }
-    memcpy(buf + 1, l, end - l);
-    buf[1 + end - l] = 0;
+    *op = (*op << 24) | (uint32_t)(end - l);
+    if (off) 
+        buf[4] = '/';
+    memcpy(buf + 4 + off, l, end - l);
+    buf[4 + off + end - l] = 0;
     strings_push(incl ? &m->includes : ss, buf);
     return true;
 }

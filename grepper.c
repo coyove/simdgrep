@@ -7,6 +7,8 @@
 #include <pthread.h>
 #include <assert.h>
 
+pthread_mutex_t empty_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static sljit_sw ascii_casecmp(sljit_sw a, sljit_sw b)
 {
     struct grepper *g = (struct grepper *)a;
@@ -96,7 +98,7 @@ int grepper_fixed(struct grepper *g, const char *find)
     size_t caseless = 0;
 
     g->cmp = 0;
-    g->next_g = 0;
+    g->next_g = NULL;
     g->len = strlen(find);
     assert(g->len);
     g->find = (char *)malloc(g->len * 3 + 12);
@@ -156,14 +158,14 @@ void grepper_create(struct grepper *g, const char *s)
     PCRE2_SIZE erroroffset;
     char tmp[256];
 
-    g->fixed = 0;
-    g->re = 0;
-    g->rx_error = 0;
-    g->find = 0;
-    g->findupper = 0;
-    g->findlower = 0;
-    g->next_g = 0;
-    g->cmp = 0;
+    g->fixed = false;
+    g->re = NULL;
+    g->rx_error = NULL;
+    g->find = NULL;
+    g->findupper = NULL;
+    g->findlower = NULL;
+    g->next_g = NULL;
+    g->cmp = NULL;
     g->re = pcre2_compile((PCRE2_SPTR)s, PCRE2_ZERO_TERMINATED,
             (g->ignore_case ? PCRE2_CASELESS : 0) |
             (g->disable_unicode ? 0 : PCRE2_UTF) |
@@ -528,7 +530,8 @@ static struct grepline *_init_ctx_grepline(struct grepline *out, struct grepline
     out->nr = nr;
     out->len = len;
     out->line = line;
-    out->match_start = out->match_end = 0;
+    out->match_start = 0;
+    out->match_end = 0;
     out->is_ctxline = true;
     return out;
 }
@@ -626,9 +629,8 @@ READ:
     return res;
 }
 
-int grepfile_acquire_chunk(struct grepper *g, struct grepfile_chunk *part)
+int grepfile_acquire_chunk(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
 {
-    struct grepfile *file = part->file;
     FILE_LOCK();
 
     if (file->off >= file->size) {
@@ -688,25 +690,24 @@ READ:
 
 int grepfile_open(struct grepper *g, struct grepfile *file, struct grepfile_chunk *part)
 {
-    if (!matcher_match(file->root_matcher, file->name, false, part->buf, part->buf_size))
-        return OPEN_IGNORED;
-
-    int fd = open(file->name, O_RDONLY);
-    if (fd < 0)
-        return errno;
+    if (file->fd == 0) {
+        int fd = open(file->name, O_RDONLY);
+        if (fd < 0)
+            return errno;
+        file->fd = fd;
+    }
 
     file->lines = 0;
     file->off = 0;
     file->status = STATUS_OPENED;
-    file->fd = fd;
-    file->size = lseek(fd, 0, SEEK_END);
+    file->size = lseek(file->fd, 0, SEEK_END);
     file->chunk_refs = 1;
     if (file->size < 0)
         return errno;
     if (file->size == 0)
         return OPEN_EMPTY;
 
-    int res = grepfile_acquire_chunk(g, part);
+    int res = grepfile_acquire_chunk(g, file, part);
     if (res == FILL_LAST_CHUNK || res == FILL_OK) {
         // Fill okay.
     } else if (res == FILL_EOF) {
@@ -734,7 +735,7 @@ int grepfile_release(struct grepfile *file)
 
 void grepfile_process_chunk(struct grepper *g, struct grepfile_chunk *part)
 {
-    struct grepline before_lines[g->before_lines];
+    struct grepline *before_lines = (struct grepline *)alloca(g->before_lines * sizeof(struct grepline));
     struct grepfile *file = part->file;
     struct grepline gl = {
         .g = g,

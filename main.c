@@ -7,7 +7,6 @@
 #include <dirent.h>
 #include <string.h>
 #include <assert.h>
-#include <unistd.h>
 
 struct matcher *default_matcher;
 struct stack tasks = {0};
@@ -51,11 +50,26 @@ struct grepfile *pop_task(uint8_t tid)
 void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
 {
     struct grepfile *file = (struct grepfile *)calloc(1, sizeof(struct grepfile));
+    char reason[256];
+    if (!is_dir) {
+        if (!matcher_match(m, name, false, reason, sizeof(reason))) {
+            atomic_fetch_add(&flags.ignores, 1);
+            DBG("ignore file %s\n", reason);
+            return;
+        }
+        if (tasks.count < flags.max_imm_openfiles) {
+            int fd = open(name, O_RDONLY);
+            if (fd < 0) {
+                ERR("immediate open");
+                return; 
+            }
+            file->fd = fd;
+        }
+    }
     file->name = name;
     file->root_matcher = m;
     file->status = STATUS_QUEUED;
-    pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
-    file->lock = mx;
+    file->lock = empty_mutex;
     if (is_dir)
         file->status |= STATUS_IS_DIR;
     push_task(tid, file);
@@ -140,7 +154,7 @@ NEXT:
             goto FREE_FILE;
         } // INC_NEXT
         push_task(p->tid, file);
-        res = grepfile_acquire_chunk(&g, &p->chunk);
+        res = grepfile_acquire_chunk(&g, file, &p->chunk);
         if (res == FILL_OK || res == FILL_LAST_CHUNK) {
             grepfile_process_chunk(&g, &p->chunk);
         } else if (res == FILL_EOF) {
@@ -151,10 +165,7 @@ NEXT:
         goto CONTINUE_LOOP;
     } else {
         int res = grepfile_open(&g, file, &p->chunk);
-        if (res == OPEN_IGNORED) {
-            atomic_fetch_add(&flags.ignores, 1);
-            DBG("ignore file %s\n", p->chunk.buf);
-        } else if (res == OPEN_BINARY_SKIPPED) {
+        if (res == OPEN_BINARY_SKIPPED) {
             // Skip binary file. (-I flag)
         } else if (res == OPEN_EMPTY) {
             // Empty file.
@@ -165,7 +176,7 @@ NEXT:
         } else if (res == FILL_OK) {
             while ((file->status & STATUS_IS_BINARY) || tasks.count > flags.num_threads) {
                 grepfile_process_chunk(&g, &p->chunk);
-                int res = grepfile_acquire_chunk(&g, &p->chunk);
+                int res = grepfile_acquire_chunk(&g, file, &p->chunk);
                 if (res != FILL_OK && res != FILL_LAST_CHUNK) {
                     if (res != FILL_EOF)
                         ERR("read %s", file->name);
@@ -218,10 +229,8 @@ void usage()
 
 int main(int argc, char **argv) 
 {
-    if (pthread_mutex_init(&flags.lock, NULL) != 0) { 
-        ERR0("simdgrep can't start");
-        return 0; 
-    } 
+    flags.max_imm_openfiles = (int)max_openfiles() * 3 / 4;
+    flags.lock = empty_mutex;
     flags.color = isatty(STDOUT_FILENO);
     flags.xbytes = 1e8;
     flags.verbose = 7;
@@ -237,7 +246,7 @@ int main(int argc, char **argv)
 
     int cop;
     opterr = 0;
-    while ((cop = getopt(argc, argv, "nhfFZPGaIAU:B:C:E:q:x:j:v:z:")) != -1) {
+    while ((cop = getopt(argc, argv, "nhfFZPGaIUo:A:B:C:E:q:x:j:v:")) != -1) {
         switch (cop) {
         case 'F': flags.fixed_string = true; break;
         case 'f': g.search_name = true; flags.verbose = 4; break;
@@ -258,6 +267,7 @@ int main(int argc, char **argv)
         case 'x': flags.xbytes = MAX(0, atoi(optarg)); break;
         case 'j': flags.num_threads = MIN(MAX(1, atoi(optarg)), 255); break;
         case 'v': flags.verbose = MIN(7, MAX(0, atoi(optarg))); break;
+        case 'o': flags.max_imm_openfiles = MIN(1000000, MAX(0, atoi(optarg))); break;
         case 'E':
                   LOG("* add exclude pattern %s\n", optarg);
                   matcher_add_rule(default_matcher, optarg, optarg + strlen(optarg), false);
@@ -268,19 +278,19 @@ int main(int argc, char **argv)
     if (optind >= argc)
         usage();
 
-    struct worker workers[flags.num_threads];
     int32_t _Atomic actives = 0;
-
+    struct worker *w = (struct worker *)alloca(flags.num_threads * sizeof(struct worker));
     const char *expr = argv[optind];
     if (strlen(expr) == 0)
         goto EXIT;
     
-    LOG("* search pattern: '%s', arg files: %d\n", expr, argc - optind - 1);
+    LOG("* search pattern: '%s', file args: %d\n", expr, argc - optind - 1);
     LOG("* use %d threads\n", flags.num_threads);
     LOG("* binary mode: %d\n", g.binary_mode);
     LOG("* verbose mode: %d\n", flags.verbose);
     LOG("* print -%d+%d lines\n", g.before_lines, g.after_lines);
     LOG("* print line context %d bytes\n", flags.xbytes);
+    LOG("* max immediately open files: %d\n", flags.max_imm_openfiles);
 
     if (flags.fixed_string) {
         int c = grepper_fixed(&g, expr);
@@ -329,35 +339,33 @@ int main(int argc, char **argv)
         LOG("* search current working directory\n");
     }
     for (int i = 0; i < flags.num_threads; ++i) {
-        workers[i].actives = &actives;
-        workers[i].tid = (uint8_t)i;
-        memset(&workers[i].chunk, 0, sizeof(workers[i].chunk));
-        workers[i].chunk.buf_size = DEFAULT_BUFFER_CAP;
-        workers[i].chunk.cap_size = DEFAULT_BUFFER_CAP;
-        workers[i].chunk.buf = (char *)malloc(DEFAULT_BUFFER_CAP + 64);
+        w[i].actives = &actives;
+        w[i].tid = (uint8_t)i;
+        memset(&w[i].chunk, 0, sizeof(w[i].chunk));
+        w[i].chunk.buf_size = DEFAULT_BUFFER_CAP;
+        w[i].chunk.cap_size = DEFAULT_BUFFER_CAP;
+        w[i].chunk.buf = (char *)malloc(DEFAULT_BUFFER_CAP + 64);
         if (g.re)
-            workers[i].chunk.match_data = pcre2_match_data_create_from_pattern(g.re, NULL);
-        pthread_create(&workers[i].thread, NULL, push, (void *)&workers[i]);
+            w[i].chunk.match_data = pcre2_match_data_create_from_pattern(g.re, NULL);
+        pthread_create(&w[i].thread, NULL, push, (void *)&w[i]);
     }
     for (int i = 0; i < flags.num_threads; ++i) {
-        pthread_join(workers[i].thread, NULL);
-        free(workers[i].chunk.buf);
+        pthread_join(w[i].thread, NULL);
+        free(w[i].chunk.buf);
         if (g.re)
-            pcre2_match_data_free(workers[i].chunk.match_data);
+            pcre2_match_data_free(w[i].chunk.match_data);
     }
     assert(tasks.count == 0);
     print_flush();
 
     LOG("* searched %ld files\n", (long)flags.files);
 
-    int num_ignorefiles = matchers.count;
     if (!flags.no_ignore)
-        LOG("* respected %d .gitignore, %ld files ignored\n", num_ignorefiles, (long)flags.ignores);
+        LOG("* respected %ld .gitignore, %ld files ignored\n", (long)matchers.count, (long)flags.ignores);
     stack_free(&matchers, matcher_free);
 
 EXIT:
     grepper_free(&g);
     matcher_free(default_matcher);
-    pthread_mutex_destroy(&flags.lock); 
     return 0;
 }

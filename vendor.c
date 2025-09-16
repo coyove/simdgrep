@@ -300,8 +300,9 @@ bool extract_fixed(const char *pattern, pcre2_code *re, struct strings *fixed) {
                 break;
         }
     }
-    DBG("all fixed: %d\n", skips == 0);
-    return skips == 0;
+    bool all_fixed = skips == 0 && fixed->len > 0;
+    DBG("all fixed: %d %ld\n", all_fixed, fixed->len);
+    return all_fixed;
 }
 
 // int main(void) {

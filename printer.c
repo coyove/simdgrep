@@ -1,6 +1,6 @@
 #include "grepper.h"
 
-struct _flags flags = {0};
+struct _Flags flags = {0};
 
 static char printer_buffer[1 << 20];
 

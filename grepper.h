@@ -33,7 +33,6 @@
 #define BINARY_IGNORE     2
 
 #define OPEN_EMPTY        -98
-#define OPEN_IGNORED      -99
 #define OPEN_BINARY_SKIPPED -100
 
 #define FILL_OK           -1
@@ -143,12 +142,14 @@ struct worker {
     struct grepfile_chunk chunk;
 };
 
-struct _flags {
+struct _Flags {
     char cwd[PATH_MAX];
     bool color;
     bool fixed_string;
     bool no_symlink;
     bool no_ignore;
+    bool imm_open;
+    int max_imm_openfiles;
     int num_threads;
     int quiet;
     int xbytes;
@@ -158,7 +159,9 @@ struct _flags {
     int64_t _Atomic files;
 };
 
-extern struct _flags flags;
+extern pthread_mutex_t empty_mutex;
+
+extern struct _Flags flags;
 
 void print_flush();
 
@@ -196,7 +199,7 @@ int grepfile_inc_ref(struct grepfile *file);
 
 void grepfile_dec_ref(struct grepfile *file);
 
-int grepfile_acquire_chunk(struct grepper *, struct grepfile_chunk *);
+int grepfile_acquire_chunk(struct grepper *, struct grepfile *, struct grepfile_chunk *);
 
 void grepfile_process_chunk(struct grepper *, struct grepfile_chunk *);
 
