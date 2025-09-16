@@ -1,11 +1,10 @@
+#include "grepper.h"
+
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-
-#include "grepper.h"
 
 #define _INAME 'N'
 #define _IPATH 'G'

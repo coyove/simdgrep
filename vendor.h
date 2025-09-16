@@ -3,7 +3,15 @@
 
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#define ssize_t int64_t
+#define size_t uint64_t
+#define PATH_MAX MAX_PATH
+#else
 #include <unistd.h>
+#endif
 
 #include "stack.h"
 #include "stclib/common.h"

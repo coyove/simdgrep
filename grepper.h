@@ -206,12 +206,6 @@ const char *indexbyte(const char *s, const char *end, const uint8_t a);
 
 const char *indexlastbyte(const char *start, const char *s, const uint8_t a);
 
-static inline int64_t now() {
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    return start.tv_sec * 1000000000L + start.tv_nsec;
-}
-
 static inline int64_t MAX(int64_t a, int64_t b) { return a > b ? a : b; }
 
 static inline int64_t MIN(int64_t a, int64_t b) { return a < b ? a : b; }

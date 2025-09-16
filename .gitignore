@@ -5,9 +5,11 @@ cpuprofile
 *.map
 out.*
 simdgrep
+simdgrep.exe
 test*.txt
 *.dSYM
 *.o
+*.swp
 perf*
 *.cmake
 CMake*
