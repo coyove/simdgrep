@@ -2,3 +2,6 @@
 	path = pcre2
 	url = https://github.com/PCRE2Project/pcre2
     branch = pcre2-10.46
+[submodule "dirent"]
+	path = dirent
+	url = https://github.com/tronkko/dirent.git

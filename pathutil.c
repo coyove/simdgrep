@@ -83,7 +83,13 @@ char *join_path(const char *root, const char *b, int len)
         res[ln] = '/';
         memcpy(res + ln + 1, b, len);
     }
+#ifdef _WIN32
+    char *tmp = (char *)malloc(PATH_MAX);
+    GetFullPathNameA(res, PATH_MAX, tmp, NULL);
+    return tmp;
+#else
     return realpath(res, NULL);
+#endif
 }
 
 static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_dir)
@@ -208,6 +214,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
 
 static struct matcher *_matcher_load_raw(char *dir, const char *f)
 {
+#ifndef _WIN32
     char *path = (char *)malloc(strlen(dir) + 1 + strlen(f) + 1);
     memcpy(path, dir, strlen(dir));
     memcpy(path + strlen(dir), "/", 1);
@@ -240,12 +247,14 @@ static struct matcher *_matcher_load_raw(char *dir, const char *f)
         return m;
 
     matcher_free(m);
+#endif
     return NULL;
 }
 
 struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers)
 {
     struct matcher *m = NULL;
+#ifndef _WIN32
     bool enter_repo = false;
     if (faccessat(dirfd, ".git", F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
         enter_repo = true;
@@ -266,6 +275,7 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
             stack_push(0, matchers, (struct stacknode *)m);
         }
     }
+#endif
     return m;
 }
 
@@ -285,6 +295,10 @@ bool is_repo_bin(const char *dir, const char *name)
 bool is_dir(const char *name, bool follow_link)
 {
     struct stat ss;
+#ifdef _WIN32
+    stat(name, &ss);
+#else
     follow_link ? stat(name, &ss) : lstat(name, &ss); 
+#endif
     return S_ISDIR(ss.st_mode);
 }

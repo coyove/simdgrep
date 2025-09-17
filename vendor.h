@@ -6,9 +6,19 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <malloc.h>
+#include <io.h>
 #define ssize_t int64_t
 #define size_t uint64_t
 #define PATH_MAX MAX_PATH
+#define alloca _alloca
+#define open _open
+#define read _read
+#define close _close
+#define lseek _lseek
+#define S_ISDIR(m)  (((m) & _S_IFMT) == _S_IFDIR)
+#define __builtin_unreachable()
+#define __builtin_popcountll(x) __popcnt64(x)
 #else
 #include <unistd.h>
 #include <alloca.h>
@@ -519,15 +529,48 @@ int wildmatch(const char *pattern, const char *text, unsigned int flags);
 
 static inline ssize_t v_pread(int fd, void *buf, size_t nbyte, size_t offset)
 {
+#ifdef _WIN32
+    lseek(fd, offset, 0);
+    return read(fd, buf, nbyte);
+#else
     return pread(fd, buf, nbyte, offset);
+#endif
 }
 
 static inline uint64_t max_openfiles()
 {
+#ifdef _WIN32
+	return 2560;
+#else
     struct rlimit rlim;
     if (getrlimit(RLIMIT_NOFILE, &rlim) != 0)
         exit(1);
     return rlim.rlim_cur;
+#endif
 }
+
+#ifdef _WIN32
+static inline char *strndup(const char *s, size_t n) {
+    size_t len = strnlen(s, n);
+    char *copy = (char*)malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, s, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static inline int __builtin_clzll(uint64_t x) {
+    unsigned long index;
+    _BitScanReverse64(&index, x);
+    return 63 - (int)index;
+}
+
+static inline int __builtin_ctzll(uint64_t x) {
+    unsigned long index;
+    _BitScanForward64(&index, x);
+    return (int)index;
+}
+
+#endif
 
 #endif

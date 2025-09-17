@@ -267,7 +267,7 @@ EXIT:
 }
 
 bool extract_fixed(const char *pattern, pcre2_code *re, struct strings *fixed) {
-    char out[strlen((const char *)pattern)];
+    char *out = (char *)alloca(strlen((const char *)pattern));
     PCRE2_SPTR code = (PCRE2_SPTR)((uint8_t *)re + re->code_start);
     bool utf = (re->overall_options & PCRE2_UTF) != 0;
     int len = 0, op = 0, depth = 0, skips = 0;

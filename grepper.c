@@ -208,7 +208,7 @@ void grepper_create(struct grepper *g, const char *s)
     strings_free(&arr);
 }
 
-#if defined(__x86_64__)
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__) || defined(__amd64__)
 
 #include <emmintrin.h>
 #include <immintrin.h>

@@ -8,6 +8,10 @@
 #include <string.h>
 #include <assert.h>
 
+#ifdef _WIN32
+#include "stclib/getopt.h"
+#endif
+
 struct matcher *default_matcher;
 struct stack tasks = {0};
 struct stack matchers = {0};
@@ -95,6 +99,7 @@ NEXT:
         }
         return 0;
     }
+	    printf("=======%s %d\n", file->name, tasks.count);
     atomic_fetch_add(p->actives, 1);
 
     if (file->status & STATUS_IS_DIR) {
@@ -114,11 +119,13 @@ NEXT:
 
         struct matcher *root = file->root_matcher;
         if (!flags.no_ignore) {
+#ifndef _WIN32
             struct matcher *m = matcher_load_ignore_file(dirfd(dir), file->name, root, &matchers);
             if (m) {
                 DBG("load ignore file from %s\n", m->root);
                 root = m;
             }
+#endif
         }
 
         struct dirent *dirent;
@@ -231,10 +238,15 @@ int main(int argc, char **argv)
 {
     flags.max_imm_openfiles = (int)max_openfiles() * 3 / 4;
     flags.lock = empty_mutex;
-    flags.color = isatty(STDOUT_FILENO);
     flags.xbytes = 1e8;
     flags.verbose = 7;
+#ifdef _WIN32
+    flags.color = false;
+    flags.num_threads = 48;
+#else
+    flags.color = isatty(STDOUT_FILENO);
     flags.num_threads = MIN(255, sysconf(_SC_NPROCESSORS_ONLN) * 2);
+#endif
     getcwd(flags.cwd, sizeof(flags.cwd));
 
     default_matcher = (struct matcher *)calloc(1, sizeof(struct matcher));
