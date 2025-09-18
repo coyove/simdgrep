@@ -1,5 +1,6 @@
 #include "grepper.h"
 
+#include <_strings.h>
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,46 +53,6 @@ const char *rel_path(const char *a, const char *b)
     return b + al + 1;
 }
 
-char *join_path(const char *root, const char *b, int len)
-{
-    char res[PATH_MAX];
-    memset(res, 0, sizeof(res));
-    /*
-     * Windows style path "X:\abc", convert it to mingw (non-standard) style "/X/abc".
-     * 'root' is always forward slash separated. (given .gitignores are all correctly written)
-     * 
-     */
-    if (len >= 3 && isalpha(b[0]) && b[1] == ':' && b[2] == '\\') {
-#ifdef __CYGWIN__ 
-        memcpy(res, "/cygdrive/", 10);
-        res[10] = tolower(b[0]);
-        memcpy(res + 11, b + 2, len - 2 + 1);
-#endif
-#ifdef __MINGW32__ 
-        res[0] = res[2] = '/';
-        res[1] = tolower(b[0]);
-        memcpy(res + 3, b + 3, len - 3);
-#endif
-        for (char *c = res; *c; c++) {
-            *c = *c == '\\' ? '/' : *c;
-        }
-    } else if (len > 0 && b[0] == '/') {
-        memcpy(res, b, len);
-    } else {
-        int ln = strlen(root);
-        memcpy(res, root, ln);
-        res[ln] = '/';
-        memcpy(res + ln + 1, b, len);
-    }
-#ifdef _WIN32
-    char *tmp = (char *)malloc(PATH_MAX);
-    GetFullPathNameA(res, PATH_MAX, tmp, NULL);
-    return tmp;
-#else
-    return realpath(res, NULL);
-#endif
-}
-
 static bool _matcher_wildmatch(const char *pattern, const char *name, bool is_dir)
 {
     unsigned flag = (*(uint32_t *)pattern) >> 24;
@@ -123,7 +84,7 @@ static bool _matcher_negate_match(struct matcher *m, const char *name, bool is_d
     return false;
 }
 
-bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reason, int rn)
+bool matcher_match(struct matcher *m, const char *name, bool is_dir)
 {
     const char *orig = name;
     if (m->root) {
@@ -139,8 +100,7 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         }
     }
     if (!incl) {
-        if (reason)
-            DBG("[IGNORE] %s not included", name);
+        DBG("[IGNORE] %s not included\n", name);
         return false;
     }
 
@@ -148,15 +108,20 @@ bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *reaso
         const char *v = m->excludes.data[i];
         if (_matcher_wildmatch(v, name, is_dir)) {
             if (!_matcher_negate_match(m, name, is_dir)) {
-                if (reason) {
-                    char *tmp;
-                    DBG("[IGNORE] %s by %s/%s, rule: %s", name, m->root, m->file, v);
-                }
+                unsigned flag = (*(uint32_t *)v) >> 24;
+                const char *rule = "";
+                if (flag == MATCH_SUFFIX_DIR) rule = "MATCH_SUFFIX_DIR";
+                if (flag == MATCH_SUFFIX_FILE) rule = "MATCH_SUFFIX_FILE";
+                if (flag == MATCH_FULL_FILE) rule = "MATCH_FULL_FILE";
+                if (flag == MATCH_FULL_DIR) rule = "MATCH_FULL_DIR";
+                if (flag == MATCH_DIR) rule = "MATCH_DIR";
+                if (flag == MATCH_FILE) rule = "MATCH_FILE";
+                DBG("[IGNORE] %s by %s/%s, %s(%s)\n", name, m->root, m->file, rule, v + 4);
                 return false;
             }
         }
     }
-    return m->parent ? matcher_match(m->parent, orig, is_dir, reason, rn) : true;
+    return m->parent ? matcher_match(m->parent, orig, is_dir) : true;
 }
 
 void matcher_free(void *p)
@@ -203,7 +168,7 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     } else {
         *op = simple ? (off = 1, MATCH_SUFFIX_FILE) : MATCH_FILE;
     }
-    *op = (*op << 24) | (uint32_t)(end - l);
+    *op = (*op << 24) | (uint32_t)(end - l + off);
     if (off) 
         buf[4] = '/';
     memcpy(buf + 4 + off, l, end - l);
@@ -212,51 +177,54 @@ bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool in
     return true;
 }
 
-static struct matcher *_matcher_load_raw(char *dir, const char *f)
+static struct matcher *_matcher_load_raw(const char *dir, const char *f)
 {
-#ifndef _WIN32
-    char *path = (char *)malloc(strlen(dir) + 1 + strlen(f) + 1);
-    memcpy(path, dir, strlen(dir));
-    memcpy(path + strlen(dir), "/", 1);
-    memcpy(path + strlen(dir) + 1, f, strlen(f) + 1);
+    JOIN_PATH_TMP(path, dir, f);
 
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t read;
-    FILE *fp = fopen(path, "r");
-    if (fp == NULL) {
-        free(path);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        ERR("open ignore file %s", path);
         return NULL;
     }
 
-    struct matcher *m = (struct matcher *)malloc(sizeof(struct matcher));
-    memset(m, 0, sizeof(struct matcher));
+    size_t size = lseek(fd, 0, SEEK_END);
+    char *buf = (char *)malloc(size + 64);
+    v_pread(fd, buf, size, 0);
+    struct matcher *m = (struct matcher *)calloc(1, sizeof(struct matcher));
 
-    while ((read = getline(&line, &len, fp)) > 0)
-        matcher_add_rule(m, line, line + read, false);
+    for (size_t i = 0; i < size;) {
+        const char *next = indexbyte(buf + i, buf + size, '\n');
+        if (!next)
+            next = buf + size;
+        matcher_add_rule(m, buf + i, next, false);
+        i = next - buf + 1;
+    }
 
-    fclose(fp);
-    if (line)
-        free(line);
+    close(fd);
+    free(buf);
 
-    path[strlen(dir)] = 0;
-    m->root = path;
+    m->root = strdup(dir);
     m->file = f;
 
     if (m->excludes.len + m->negate_excludes.len > 0)
         return m;
 
     matcher_free(m);
-#endif
     return NULL;
 }
 
-struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers)
+static bool file_exists(const char *dir, const char *name)
+{
+    JOIN_PATH_TMP(tmp, dir, name);
+    struct stat ss;
+    return stat(tmp, &ss) == 0;
+}
+
+struct matcher *matcher_load_ignore_file(const char *dir, struct matcher *parent, struct stack *matchers)
 {
     struct matcher *m = NULL;
-#ifndef _WIN32
     bool enter_repo = false;
-    if (faccessat(dirfd, ".git", F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
+    if (file_exists(dir, ".git")) {
         enter_repo = true;
         m = _matcher_load_raw(dir, ".git/info/exclude");
         if (m) {
@@ -267,7 +235,7 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
         }
     }
 
-    if (faccessat(dirfd, ".gitignore", F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
+    if (file_exists(dir, ".gitignore")) {
         m = _matcher_load_raw(dir, ".gitignore");
         if (m) {
             m->parent = enter_repo ? parent->top : parent;
@@ -275,7 +243,6 @@ struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *p
             stack_push(0, matchers, (struct stacknode *)m);
         }
     }
-#endif
     return m;
 }
 
@@ -300,5 +267,5 @@ bool is_dir(const char *name, bool follow_link)
 #else
     follow_link ? stat(name, &ss) : lstat(name, &ss); 
 #endif
-    return S_ISDIR(ss.st_mode);
+    return (ss.st_mode & S_IFMT) == S_IFDIR;
 }

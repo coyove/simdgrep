@@ -54,17 +54,17 @@ struct grepfile *pop_task(uint8_t tid)
 void new_task(uint8_t tid, char *name, struct matcher *m, bool is_dir)
 {
     struct grepfile *file = (struct grepfile *)calloc(1, sizeof(struct grepfile));
-    char reason[256];
     if (!is_dir) {
-        if (!matcher_match(m, name, false, reason, sizeof(reason))) {
+        if (!matcher_match(m, name, false)) {
             atomic_fetch_add(&flags.ignores, 1);
-            DBG("ignore file %s\n", reason);
+            free(name);
             return;
         }
         if (tasks.count < flags.max_imm_openfiles) {
             int fd = open(name, O_RDONLY);
             if (fd < 0) {
-                ERR("immediate open");
+                ERR("open %s", name);
+                free(name);
                 return; 
             }
             file->fd = fd;
@@ -99,15 +99,13 @@ NEXT:
         }
         return 0;
     }
-	    printf("=======%s %d\n", file->name, tasks.count);
     atomic_fetch_add(p->actives, 1);
 
     if (file->status & STATUS_IS_DIR) {
         size_t ln = strlen(file->name);
         ln = file->name[ln - 1] == '/' ? ln - 1 : ln;
-        if (!matcher_match(file->root_matcher, file->name, true, p->chunk.buf, p->chunk.buf_size)) {
+        if (!matcher_match(file->root_matcher, file->name, true)) {
             atomic_fetch_add(&flags.ignores, 1);
-            DBG("ignore directory %s\n", p->chunk.buf);
             goto FREE_FILE;
         }
 
@@ -119,13 +117,11 @@ NEXT:
 
         struct matcher *root = file->root_matcher;
         if (!flags.no_ignore) {
-#ifndef _WIN32
-            struct matcher *m = matcher_load_ignore_file(dirfd(dir), file->name, root, &matchers);
+            struct matcher *m = matcher_load_ignore_file(file->name, root, &matchers);
             if (m) {
                 DBG("load ignore file from %s\n", m->root);
                 root = m;
             }
-#endif
         }
 
         struct dirent *dirent;
@@ -133,10 +129,8 @@ NEXT:
             const char *dname = dirent->d_name;
             if (strcmp(dname, ".") == 0 || strcmp(dname, "..") == 0)
                 continue;
-            char *n = (char *)malloc(ln + 1 + strlen(dname) + 1);
-            memcpy(n, file->name, ln);
-            memcpy(n + ln, "/", 1);
-            memcpy(n + ln + 1, dname, strlen(dname) + 1);
+            char *n;
+            JOIN_PATH(n, file->name, dname, strlen(dname));
             bool dir = false;
             if (dirent->d_type == DT_LNK) {
                 if (flags.no_symlink) {
@@ -335,9 +329,12 @@ int main(int argc, char **argv)
         if (g) {
             matcher_add_rule(default_matcher, g, g + strlen(g), true);
             LOG("* add include pattern %s\n", g);
-            joined = name == g ? join_path(flags.cwd, ".", 1) : join_path(flags.cwd, name, g - name);
+            if (name == g)
+                JOIN_PATH(joined, flags.cwd, ".", 1);
+            else
+                JOIN_PATH(joined, flags.cwd, name, g - name);
         } else {
-            joined = join_path(flags.cwd, name, strlen(name));
+            JOIN_PATH(joined, flags.cwd, name, strlen(name));
         }
         if (!joined) {
             ERR("can't resolve path %s", name);

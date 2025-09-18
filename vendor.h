@@ -16,12 +16,12 @@
 #define read _read
 #define close _close
 #define lseek _lseek
-#define S_ISDIR(m)  (((m) & _S_IFMT) == _S_IFDIR)
 #define __builtin_unreachable()
 #define __builtin_popcountll(x) __popcnt64(x)
 #else
 #include <unistd.h>
 #include <alloca.h>
+#include <fcntl.h>
 #include <sys/resource.h>
 #endif
 

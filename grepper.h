@@ -62,6 +62,27 @@
 #define ERR0(msg, ...) LOCK_MSG(1, fprintf(stderr, msg "\n", ##__VA_ARGS__));
 #define ERR(msg, ...)  LOCK_MSG(1, fprintf(stderr, msg ": %s\n", ##__VA_ARGS__, strerror(errno)));
 
+#ifdef _WIN32
+#define PATH_SEP '\\'
+#define _JOIN_PATH_IS_ABS(b, bl) ((bl) >= 3 && (b)[2] == '\\' && (b)[1] == ':' && isalpha((b)[0]))
+#else
+#define PATH_SEP '/'
+#define _JOIN_PATH_IS_ABS(b, bl) ((bl) >= 1 && (b)[0] == '/')
+#endif 
+
+#define _JOIN_PATH(ALLOC, n, a, b, al, bl) do {\
+    size_t ln = (al);                    \
+    size_t ln2 = (bl);                   \
+    n = (char *)ALLOC(ln + 1 + ln2 + 1); \
+    if _JOIN_PATH_IS_ABS(b, ln2) { memcpy(n, b, ln2 + 1); break; } \
+    memcpy(n, a, ln + 1);                \
+    if (ln2 == 1 && b[0] == '.') break;  \
+    if (n[ln - 1] == PATH_SEP) ln--; else n[ln] = PATH_SEP; \
+    memcpy(n + ln + 1, b, ln2 + 1);      \
+} while(0)
+#define JOIN_PATH(n, a, b, bl) _JOIN_PATH(malloc, n, a, b, strlen(a), bl)
+#define JOIN_PATH_TMP(n, a, b) char *n; _JOIN_PATH(alloca, n, a, b, strlen(a), strlen(b))
+
 typedef sljit_sw (SLJIT_FUNC *func2_t)(sljit_sw a, sljit_sw b);
 
 struct matcher {
@@ -171,19 +192,17 @@ const char *is_glob_path(const char *p, const char *end);
 
 const char *rel_path(const char *a, const char *b);
 
-char *join_path(const char *cwd, const char *b, int len);
-
 bool is_repo_bin(const char *dir, const char *name);
 
 bool is_dir(const char *name, bool follow_link);
 
-bool matcher_match(struct matcher *m, const char *name, bool is_dir, char *rule, int n);
+bool matcher_match(struct matcher *m, const char *name, bool is_dir);
 
 void matcher_free(void *m);
 
 bool matcher_add_rule(struct matcher *m, const char *l, const char *end, bool incl);
 
-struct matcher *matcher_load_ignore_file(int dirfd, char *dir, struct matcher *parent, struct stack *matchers);
+struct matcher *matcher_load_ignore_file(const char *, struct matcher *, struct stack *);
 
 int grepper_fixed(struct grepper *, const char *);
 
